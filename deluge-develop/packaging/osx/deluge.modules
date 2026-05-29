@@ -1,0 +1,62 @@
+<?xml version="1.0"?>
+<!DOCTYPE moduleset SYSTEM "moduleset.dtd">
+<?xml-stylesheet type="text/xsl" href="moduleset.xsl"?>
+<moduleset>
+    <repository type="git" name="git.gnome"
+        href="git://git.gnome.org"/>
+    <repository type="tarball" name="pypi"
+        href="http://pypi.python.org/packages/source/"/>
+
+    <metamodule id="deluge">
+        <dependencies>
+            <dep package="libtorrent"/>
+            <dep package="gtk-mac-bundler"/>
+            <dep package="deluge-python-deps"/>
+        </dependencies>
+    </metamodule>
+
+    <autotools id="gtk-mac-bundler" autogen-template="echo no configure">
+        <branch repo="git.gnome" module="gtk-mac-bundler"/>
+    </autotools>
+
+    <metamodule id="deluge-python-deps">
+        <dependencies>
+            <dep package="setuptools"/>
+            <dep package="chardet"/>
+            <dep package="pyopenssl"/>
+            <dep package="pyxdg"/>
+            <dep package="py2app"/>
+            <dep package="mako"/>
+            <dep package="twisted"/>
+        </dependencies>
+    </metamodule>
+
+    <distutils id="setuptools">
+        <branch repo="pypi" version="0.6c11"
+            module="s/setuptools/setuptools-0.6c11.tar.gz"/>
+    </distutils>
+    <distutils id="chardet">
+        <branch repo="pypi" version="2.1.1"
+            module="c/chardet/chardet-2.1.1.tar.gz"/>
+    </distutils>
+    <distutils id="pyopenssl">
+        <branch repo="pypi" version="0.13"
+            module="p/pyOpenSSL/pyOpenSSL-0.13.tar.gz"/>
+    </distutils>
+    <distutils id="pyxdg">
+        <branch repo="pypi" version="0.25"
+            module="p/pyxdg/pyxdg-0.25.tar.gz"/>
+    </distutils>
+    <distutils id="py2app">
+        <branch repo="pypi" version="0.7.3"
+            module="p/py2app/py2app-0.7.3.tar.gz"/>
+    </distutils>
+    <distutils id="mako">
+        <branch repo="pypi" version="0.7.3"
+            module="M/Mako/Mako-0.7.3.tar.gz"/>
+    </distutils>
+    <distutils id="twisted">
+        <branch repo="pypi" version="12.3.0"
+            module="T/Twisted/Twisted-12.3.0.tar.bz2"/>
+    </distutils>
+</moduleset>

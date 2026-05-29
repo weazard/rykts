@@ -1,0 +1,7 @@
+-r requirements.txt
+-r docs/requirements.txt
+-r requirements-tests.txt
+sphinx-autobuild
+tox
+pre-commit
+rjsmin
