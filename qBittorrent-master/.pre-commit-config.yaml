@@ -1,0 +1,88 @@
+repos:
+  - repo: local
+    hooks:
+      - id: check-grid-order
+        name: Check items order in grid layouts
+        entry: .github/workflows/helper/pre-commit/check_grid_items_order.py
+        language: script
+        files: \.ui$
+
+      - id: check-translation-tag
+        name: Check newline characters in <translation> tag
+        entry: .github/workflows/helper/pre-commit/check_translation_tag.py
+        language: script
+        exclude: |
+          (?x)^(
+            src/lang/.*
+          )$
+        types_or:
+          - ts
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks.git
+    rev: v6.0.0
+    hooks:
+    - id: check-json
+      name: Check JSON files
+
+    - id: check-yaml
+      name: Check YAML files
+
+    - id: end-of-file-fixer
+      name: Check trailing newlines
+      exclude: |
+        (?x)^(
+          src/webui/www/private/css/lib/.* |
+          src/webui/www/private/scripts/lib/.* |
+          test/testdata/crlf.txt
+        )$
+      exclude_types:
+        - svg
+        - ts
+
+  - repo: https://github.com/editorconfig-checker/editorconfig-checker.python.git
+    rev: 3.6.1
+    hooks:
+    - id: editorconfig-checker
+      name: Check code formatting (EditorConfig)
+
+  - repo: https://github.com/codespell-project/codespell.git
+    rev: v2.4.2
+    hooks:
+    - id: codespell
+      name: Check spelling (codespell)
+      args: ["--ignore-words-list", "additionals,categor,curren,fo,indexIn,ist,ket,notin,searchin,sectionin,superseeding,te,ths"]
+      exclude: |
+        (?x)^(
+          .*\.desktop |
+          .*\.qrc |
+          Changelog |
+          dist/windows/installer-translations/.* |
+          src/base/3rdparty/.* |
+          src/searchengine/nova3/socks.py |
+          src/webui/www/private/scripts/lib/.*
+        )$
+      exclude_types:
+        - ts
+
+  - repo: https://github.com/crate-ci/typos.git
+    rev: v1.46.0
+    hooks:
+    - id: typos
+      name: Check spelling (typos)
+      args: ["--config", ".github/workflows/helper/pre-commit/.typos.toml"]
+      exclude: |
+        (?x)^(
+          .*\.asc |
+          .*\.desktop |
+          .*\.qrc |
+          \.pre-commit-config\.yaml |
+          Changelog |
+          dist/windows/3rdparty/.* |
+          dist/windows/installer-translations/.* |
+          src/base/3rdparty/.* |
+          src/searchengine/nova3/socks.py |
+          src/webui/www/private/scripts/lib/.*
+        )$
+      exclude_types:
+        - svg
+        - ts
