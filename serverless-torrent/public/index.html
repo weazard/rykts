@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>serverless-torrent</title>
+    <style>
+      :root { color-scheme: light dark; }
+      body {
+        font: 15px/1.5 system-ui, sans-serif;
+        max-width: 760px;
+        margin: 2rem auto;
+        padding: 0 1rem;
+      }
+      h1 { font-size: 1.4rem; margin-bottom: 0.2rem; }
+      .sub { opacity: 0.7; margin-top: 0; }
+      .card { border: 1px solid #8884; border-radius: 10px; padding: 1rem; margin: 1rem 0; }
+      button { padding: 0.4rem 0.9rem; border-radius: 8px; border: 1px solid #8886; cursor: pointer; }
+      button:disabled { opacity: 0.4; cursor: default; }
+      .barwrap { background: #8883; border-radius: 6px; height: 14px; overflow: hidden; margin: 0.5rem 0; }
+      #bar { background: #3b82f6; height: 100%; width: 0; transition: width 0.3s; }
+      #log {
+        white-space: pre-wrap; font: 12px/1.4 ui-monospace, monospace;
+        background: #8881; border-radius: 8px; padding: 0.6rem; height: 220px; overflow: auto;
+      }
+      #downloads a { color: #3b82f6; }
+      code { background: #8882; padding: 0 0.3em; border-radius: 4px; }
+    </style>
+  </head>
+  <body>
+    <h1>serverless-torrent</h1>
+    <p class="sub">Semi-stateless BitTorrent. The browser is the durable cache; Vercel functions do bounded outbound downloading.</p>
+
+    <div class="card">
+      <input type="file" id="file" accept=".torrent" />
+      <p><strong id="name">no torrent loaded</strong></p>
+      <p id="details" class="sub"></p>
+      <button id="start" disabled>Start</button>
+      <button id="stop" disabled>Stop</button>
+      <div class="barwrap"><div id="bar"></div></div>
+      <p id="pct" class="sub">0/0 pieces (0%)</p>
+      <ul id="downloads"></ul>
+    </div>
+
+    <div class="card">
+      <strong>Activity</strong>
+      <div id="log"></div>
+    </div>
+
+    <p class="sub">
+      Pieces are SHA-1 verified in the browser before they touch storage, so a slow or
+      malicious peer can never corrupt your download. Peer discovery (<code>/api/announce</code>)
+      is decoupled from downloading (<code>/api/download</code>) so each download call spends its
+      whole budget transferring data, not rediscovering the swarm.
+    </p>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
