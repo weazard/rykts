@@ -230,7 +230,9 @@ async function assembleFile(file) {
 
 async function postJson(url, body) {
   try {
-    const res = await fetch(url, {
+    // Resolve to an absolute URL against the page origin. Safari's fetch rejects
+    // bare relative paths with "The string did not match the expected pattern.".
+    const res = await fetch(new URL(url, location.href), {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
