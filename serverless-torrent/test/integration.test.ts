@@ -5,8 +5,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import net from "node:net";
-import { runDownload } from "../lib/download-session.ts";
-import { sha1Hex } from "../lib/torrent.ts";
+import { runDownload } from "../lib/download-session.js";
+import { sha1Hex } from "../lib/torrent.js";
 import {
   buildHandshake,
   parseHandshake,
@@ -15,7 +15,7 @@ import {
   unchoke as unchokeMsg,
   piece as pieceMsg,
   makeBitfield,
-} from "../lib/wire.ts";
+} from "../lib/wire.js";
 
 const PIECE_LENGTH = 32768; // two 16 KiB blocks
 const LAST_LENGTH = 10000; // one partial block

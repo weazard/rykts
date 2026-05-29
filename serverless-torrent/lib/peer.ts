@@ -11,9 +11,9 @@ import {
   StreamParser,
   bitfieldHas,
   type ParsedMessage,
-} from "./wire.ts";
-import type { PieceScheduler } from "./piece-scheduler.ts";
-import type { PeerAddr } from "./types.ts";
+} from "./wire.js";
+import type { PieceScheduler } from "./piece-scheduler.js";
+import type { PeerAddr } from "./types.js";
 
 const PIPELINE_DEPTH = 8; // outstanding block requests per peer
 const CONNECT_TIMEOUT_MS = 6000;

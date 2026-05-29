@@ -90,6 +90,12 @@ async function ensurePeers() {
     log("announce error: " + res.error);
     return;
   }
+  // Surface per-tracker outcomes so "0 peers" is explainable (dead tracker,
+  // unsupported wss://, UDP blocked, etc.) rather than a silent dead end.
+  for (const t of res.trackers ?? []) {
+    if (!t.ok) log(`  tracker ${t.url} failed: ${t.error ?? "unknown"}`);
+    else log(`  tracker ${t.url} → ${t.peerCount} peers`);
+  }
   // merge, dedup
   const seen = new Set(session.peers.map((p) => `${p.ip}:${p.port}`));
   for (const p of res.peers) {
@@ -229,16 +235,29 @@ async function assembleFile(file) {
 // --- helpers ---
 
 async function postJson(url, body) {
+  let res;
   try {
-    const res = await fetch(url, {
+    res = await fetch(url, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
     });
-    return await res.json();
   } catch (e) {
-    return { error: String(e?.message ?? e) };
+    return { error: `network error contacting ${url}: ${e?.message ?? e}` };
   }
+  // Read as text first so a non-JSON error page (404/500 HTML from the platform,
+  // a crashed function, etc.) yields a clear message instead of a cryptic
+  // JSON-parse DOMException.
+  const text = await res.text();
+  let data;
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch {
+    const snippet = text.slice(0, 160).replace(/\s+/g, " ").trim();
+    return { error: `HTTP ${res.status} from ${url}: non-JSON response (${snippet || "empty"})` };
+  }
+  if (!res.ok) return { error: data.error || `HTTP ${res.status} from ${url}` };
+  return data;
 }
 
 function base64ToBytes(b64) {

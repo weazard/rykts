@@ -4,9 +4,9 @@
 // returned peers and reuses them across many cheap /api/download calls.
 
 import dgram from "node:dgram";
-import { decode, type Bencodable } from "./bencode.ts";
-import { fromHex } from "./torrent.ts";
-import type { AnnounceRequest, AnnounceResponse, PeerAddr } from "./types.ts";
+import { decode, type Bencodable } from "./bencode.js";
+import { fromHex } from "./torrent.js";
+import type { AnnounceRequest, AnnounceResponse, PeerAddr } from "./types.js";
 
 export async function announce(req: AnnounceRequest): Promise<AnnounceResponse> {
   const peerId = req.peerId ? fromHex(req.peerId) : defaultPeerId();

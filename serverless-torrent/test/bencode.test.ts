@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { decode, encode, bytesToUtf8, type Bencodable } from "../lib/bencode.ts";
+import { decode, encode, bytesToUtf8, type Bencodable } from "../lib/bencode.js";
 
 const enc = (s: string) => new TextEncoder().encode(s);
 

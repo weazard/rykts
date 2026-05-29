@@ -6,8 +6,8 @@
 // decoupled and amortized.
 
 import type { VercelRequest, VercelResponse } from "@vercel/node";
-import { announce } from "../lib/tracker.ts";
-import type { AnnounceRequest } from "../lib/types.ts";
+import { announce } from "../lib/tracker.js";
+import type { AnnounceRequest } from "../lib/types.js";
 
 export const config = { maxDuration: 30 };
 

@@ -6,8 +6,8 @@
 // them (base64) for the client to SHA-1 verify and persist. See ../README.md.
 
 import type { VercelRequest, VercelResponse } from "@vercel/node";
-import { runDownload } from "../lib/download-session.ts";
-import type { DownloadRequest } from "../lib/types.ts";
+import { runDownload } from "../lib/download-session.js";
+import type { DownloadRequest } from "../lib/types.js";
 
 export const config = {
   // Node runtime (raw TCP); give it room but the session self-limits to ~50s.

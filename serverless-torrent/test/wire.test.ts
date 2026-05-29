@@ -13,7 +13,7 @@ import {
   makeBitfield,
   readUint32,
   writeUint32,
-} from "../lib/wire.ts";
+} from "../lib/wire.js";
 
 const ih = new Uint8Array(20).fill(0xab);
 const pid = new Uint8Array(20).fill(0xcd);

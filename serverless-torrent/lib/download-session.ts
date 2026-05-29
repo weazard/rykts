@@ -2,10 +2,10 @@
 // pull blocks through the scheduler, SHA-1 verify each completed piece, and stop
 // at a deadline well under the platform's function time limit.
 
-import { PieceScheduler } from "./piece-scheduler.ts";
-import { PeerConnection, type PeerRunResult } from "./peer.ts";
-import { sha1Hex, fromHex } from "./torrent.ts";
-import type { DownloadRequest, DownloadResponse, DownloadedPiece, PeerHealth } from "./types.ts";
+import { PieceScheduler } from "./piece-scheduler.js";
+import { PeerConnection, type PeerRunResult } from "./peer.js";
+import { sha1Hex, fromHex } from "./torrent.js";
+import type { DownloadRequest, DownloadResponse, DownloadedPiece, PeerHealth } from "./types.js";
 
 // Vercel's default Node function timeout is 60s (configurable). Stay clear of it
 // so we always return cleanly with partial results rather than being killed.

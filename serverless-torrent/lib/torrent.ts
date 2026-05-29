@@ -2,8 +2,8 @@
 // browser: SHA-1 is computed via Web Crypto (globalThis.crypto.subtle), which
 // exists in both. Binary string fields are kept as Uint8Array by the decoder.
 
-import { decode, bytesToUtf8, type Bencodable } from "./bencode.ts";
-import type { TorrentMeta, TorrentFile } from "./types.ts";
+import { decode, bytesToUtf8, type Bencodable } from "./bencode.js";
+import type { TorrentMeta, TorrentFile } from "./types.js";
 
 export async function parseTorrent(buf: Uint8Array): Promise<TorrentMeta> {
   const { value, infoRange } = decode(buf);

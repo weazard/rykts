@@ -6,7 +6,7 @@
 // start of the request and discarded when the function returns. Durable state
 // lives in the browser, not here.
 
-import { BLOCK_SIZE } from "./wire.ts";
+import { BLOCK_SIZE } from "./wire.js";
 
 type BlockState = 0 | 1 | 2; // 0 need, 1 requested, 2 done
 

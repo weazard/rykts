@@ -79,8 +79,13 @@ acceptable limitation for a download-to-browser tool.
 
 ```bash
 cd serverless-torrent
-npm test          # node --experimental-strip-types --test test/*.test.ts
+npm install
+npm test          # tsx --test test/*.test.ts
 ```
+
+Source is TypeScript using the standard NodeNext convention (local imports use
+`.js` specifiers that resolve to the `.ts` files), which is what Vercel's function
+compiler expects. Tests run through `tsx` so the same specifiers resolve in dev.
 
 The integration test stands up a real TCP peer that speaks the wire protocol,
 runs the actual `runDownload()` against it, and asserts the pieces come back
@@ -111,4 +116,11 @@ the platform cap so it always returns partial progress instead of being killed.
 - **Encryption / NAT.** Plaintext BT only; no MSE/PE, no hole-punching. Many
   peers will be unreachable from a cloud IP — the peer-pruning loop routes
   around them.
+- **Tracker reality.** Many popular public torrents (e.g. the WebTorrent "Big
+  Buck Bunny") list only `udp://` and `wss://` trackers. `wss://` is a
+  WebTorrent/WebRTC tracker whose peers are browser-only and unreachable over
+  TCP, so those are skipped; `udp://` works but several well-known ones are dead.
+  The announce response reports each tracker's outcome, and the UI logs it, so a
+  "0 peers" result is explainable rather than silent. Torrents with a live
+  `http(s)://` or `udp://` tracker and conventional TCP seeds work best.
 - **Legal.** Only use with content you are authorized to distribute.
