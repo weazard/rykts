@@ -1,0 +1,141 @@
+name: Package
+
+on:
+  push:
+    tags:
+      - "deluge-*"
+      - "!deluge*-dev*"
+    branches:
+      - develop
+  pull_request:
+    types: [labeled, opened, synchronize, reopened]
+
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Enter a tag or commit to package"
+        default: ""
+
+jobs:
+  windows_package:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    if: (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'package'))
+    strategy:
+      matrix:
+        arch: [x64]
+        python: ["3.10"]
+        libtorrent: [2.0.11, 1.2.19]
+
+    steps:
+      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Checkout Deluge source to subdir to enable packaging any tag/commit
+      - name: Checkout Deluge source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref }}
+          fetch-depth: 0
+          path: deluge_src
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python}}
+          architecture: ${{ matrix.arch }}
+          cache: pip
+
+      - name: Prepare pip
+        run: python -m pip install wheel setuptools==68.*
+      - name: Install GTK
+        run: |
+          $WebClient = New-Object System.Net.WebClient
+          $WebClient.DownloadFile("https://github.com/deluge-torrent/gvsbuild-release/releases/download/gvsbuild-2026.1.0-afc4141a/gvsbuild-py${{ matrix.python }}-vs17-${{ matrix.arch }}.zip","C:\GTK.zip")
+          7z x C:\GTK.zip -oc:\GTK
+          echo "C:\GTK\release\lib" | Out-File -FilePath $env:GITHUB_PATH -Append
+          echo "C:\GTK\release\bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+          echo "C:\GTK\release" | Out-File -FilePath $env:GITHUB_PATH -Append
+          python -m pip install --no-index --find-links="C:\GTK\release\python" pycairo PyGObject
+
+      - name: Install Python dependencies
+        # Pillow no longer provides 32-bit wheels for Windows
+        # so specify only-binary to install old version.
+        run: >
+          python -m pip install
+          --only-binary=pillow
+          libtorrent==${{ matrix.libtorrent }}
+          pyinstaller
+          pygame
+          -r requirements.txt
+
+      - name: Install OpenSSL 1.1.1
+        run: |
+          choco install openssl.light --version=1.1.1.20181020
+
+      - name: Verify libtorrent
+        run: python -c 'import libtorrent as lt; print(lt.__version__)'
+
+      - name: Patch Twisted
+        shell: bash
+        run: |
+          # Find the site-packages where Twisted source installed
+          SITE_PACKAGES=$(python -c "import sysconfig; print(sysconfig.get_path('purelib'))")
+          echo "Site packages at: $SITE_PACKAGES"
+
+          # Apply the patch
+          cd "$SITE_PACKAGES"
+          patch -p1 < "$GITHUB_WORKSPACE/.github/patches/twisted-glib-windows.patch"
+
+          echo "Patch applied successfully"
+
+      - name: Install Deluge
+        working-directory: deluge_src
+        run: |
+          python -m pip install .
+          python setup.py install_scripts
+
+      - name: Freeze Deluge
+        working-directory: packaging/win
+        run: |
+          pyinstaller --clean delugewin.spec --distpath freeze
+
+      - name: Make Deluge Installer
+        working-directory: ./packaging/win
+        run: |
+          python setup_nsis.py
+          makensis /Darch=${{ matrix.arch }} deluge-win-installer.nsi
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: deluge-py${{ matrix.python }}-lt${{ matrix.libtorrent }}-${{ matrix.arch }}
+          path: packaging/win/*.exe
+
+  windows_verify:
+    needs: windows_package
+    runs-on: windows-2022
+    strategy:
+      matrix:
+        arch: [x64]
+        python: ["3.10"]
+        libtorrent: [2.0.11]
+    steps:
+      - name: Download installer
+        uses: actions/download-artifact@v7
+        with:
+          name: deluge-py${{ matrix.python }}-lt${{ matrix.libtorrent }}-${{ matrix.arch }}
+
+      - name: Install Deluge
+        run: Start-Process -Wait -FilePath (Get-Item *.exe).FullName -ArgumentList '/S'
+
+      - name: Verify installed exes
+        shell: bash
+        run: |
+          for exe in deluge-debug.exe deluged-debug.exe deluge-web-debug.exe deluge-console; do
+            echo "Verifying $exe"
+            "$PROGRAMFILES/Deluge/$exe" --version
+            "$PROGRAMFILES/Deluge/$exe" --help
+          done
