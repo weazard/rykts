@@ -237,7 +237,17 @@ async function postJson(url, body) {
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
     });
-    return await res.json();
+    // The endpoint may return a non-JSON body on failure (e.g. a platform 500
+    // page like "A server error has occurred"). Read as text and parse defensively
+    // so a crashed function surfaces a clear error instead of an opaque
+    // "Unexpected token … is not valid JSON".
+    const text = await res.text();
+    try {
+      return JSON.parse(text);
+    } catch {
+      const detail = text.trim().split("\n")[0].slice(0, 200) || res.statusText;
+      return { error: `server returned HTTP ${res.status}: ${detail}` };
+    }
   } catch (e) {
     return { error: String(e?.message ?? e) };
   }
