@@ -5,7 +5,10 @@
 // exactly the slice of this state it needs and returns verifiable results.
 
 const DB_NAME = "serverless-torrent";
-const DB_VERSION = 1;
+// v2: pieces are stored as Blobs (browsers back stored Blobs with disk), so
+// assembling multi-GB files no longer pins everything in memory. Old v1 values
+// were raw ArrayBuffers; getPiece/assembly handle both shapes.
+const DB_VERSION = 2;
 const PIECES = "pieces";
 const SESSIONS = "sessions";
 
@@ -50,15 +53,24 @@ export class Store {
   }
 
   async putPiece(infoHash, index, bytes) {
-    // store the underlying ArrayBuffer for compactness
-    return reqToPromise(
-      tx(this.db, PIECES, "readwrite").put(bytes.buffer, `${infoHash}:${index}`),
-    );
+    // Store as a Blob so the browser can spill it to disk; assembly then slices
+    // Blobs without ever materializing the whole file in memory.
+    const blob = new Blob([bytes]);
+    return reqToPromise(tx(this.db, PIECES, "readwrite").put(blob, `${infoHash}:${index}`));
   }
 
+  // Returns the raw piece Blob (or null). Handles legacy v1 ArrayBuffer values.
+  async getPieceBlob(infoHash, index) {
+    const val = await reqToPromise(tx(this.db, PIECES, "readonly").get(`${infoHash}:${index}`));
+    if (!val) return null;
+    if (val instanceof Blob) return val;
+    return new Blob([val]); // legacy ArrayBuffer
+  }
+
+  // Returns piece bytes (rarely needed now that assembly uses Blob slices).
   async getPiece(infoHash, index) {
-    const buf = await reqToPromise(tx(this.db, PIECES, "readonly").get(`${infoHash}:${index}`));
-    return buf ? new Uint8Array(buf) : null;
+    const blob = await this.getPieceBlob(infoHash, index);
+    return blob ? new Uint8Array(await blob.arrayBuffer()) : null;
   }
 }
 

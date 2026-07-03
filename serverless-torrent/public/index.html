@@ -32,13 +32,37 @@
     <p class="sub">Semi-stateless BitTorrent. The browser is the durable cache; Vercel functions do bounded outbound downloading.</p>
 
     <div class="card">
-      <input type="file" id="file" accept=".torrent" />
+      <div class="row">
+        <input type="file" id="file" accept=".torrent" />
+      </div>
+      <div class="row">
+        <input
+          type="text"
+          id="magnet"
+          class="magnet"
+          placeholder="…or paste a magnet: link"
+        />
+        <button id="loadMagnet">Load</button>
+      </div>
       <p><strong id="name">no torrent loaded</strong></p>
       <p id="details" class="sub"></p>
-      <button id="start" disabled>Start</button>
-      <button id="stop" disabled>Stop</button>
+      <div class="row">
+        <button id="start" disabled>Start</button>
+        <button id="stop" disabled>Stop</button>
+        <label class="conc">
+          Workers:
+          <select id="concurrency">
+            <option value="auto" selected>auto</option>
+            <option value="1">1</option>
+            <option value="2">2</option>
+            <option value="3">3</option>
+            <option value="4">4</option>
+          </select>
+        </label>
+      </div>
       <div class="barwrap"><div id="bar"></div></div>
       <p id="pct" class="sub">0/0 pieces (0%)</p>
+      <p id="stats" class="sub"></p>
       <ul id="downloads"></ul>
     </div>
 

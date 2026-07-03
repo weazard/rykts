@@ -28,6 +28,9 @@ export interface BlockRequest {
 }
 
 const REQUEST_TIMEOUT_MS = 8000;
+// When this few pieces remain in the work set, peers may duplicate in-flight
+// block requests instead of idling (endgame mode).
+const ENDGAME_PIECE_THRESHOLD = 4;
 
 export class PieceScheduler {
   private pieces = new Map<number, PieceProgress>();
@@ -64,7 +67,26 @@ export class PieceScheduler {
 
   // Pick the next block to request for a peer that has piece `index` (hasFn).
   // Returns null when this peer has nothing useful to request right now.
+  //
+  // Endgame: when few pieces remain and this peer has no fresh blocks to claim,
+  // allow it to *duplicate* a block already in flight with another peer (BEP 3
+  // endgame mode). Without this, the last blocks of an invocation stall behind
+  // one slow peer for up to REQUEST_TIMEOUT_MS. Duplicates are cheap (16 KiB)
+  // and onBlock() ignores the loser.
   nextRequest(owner: number, hasFn: (index: number) => boolean): BlockRequest | null {
+    const fresh = this.pickBlock(owner, hasFn, false);
+    if (fresh) return fresh;
+    if (this.pendingPieceCount <= ENDGAME_PIECE_THRESHOLD) {
+      return this.pickBlock(owner, hasFn, true);
+    }
+    return null;
+  }
+
+  private pickBlock(
+    owner: number,
+    hasFn: (index: number) => boolean,
+    allowDuplicates: boolean,
+  ): BlockRequest | null {
     const now = Date.now();
     for (const idx of this.order) {
       const p = this.pieces.get(idx);
@@ -73,8 +95,12 @@ export class PieceScheduler {
       for (let b = 0; b < p.blockStates.length; b++) {
         const st = p.blockStates[b];
         if (st === 2) continue;
-        if (st === 1 && now - p.requestedAt[b] < REQUEST_TIMEOUT_MS) continue;
-        // claim it (fresh need, or a timed-out request we re-issue)
+        if (st === 1) {
+          const stale = now - p.requestedAt[b] >= REQUEST_TIMEOUT_MS;
+          const dup = allowDuplicates && p.requestOwner[b] !== owner;
+          if (!stale && !dup) continue;
+        }
+        // claim it (fresh need, a timed-out request, or an endgame duplicate)
         p.blockStates[b] = 1;
         p.requestedAt[b] = now;
         p.requestOwner[b] = owner;

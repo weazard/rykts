@@ -2,11 +2,13 @@
 //
 // This function holds no state between invocations. The browser passes in the
 // pieces it still needs and its cached peer list; the function connects out over
-// TCP, fetches as many complete pieces as fit in its time budget, and returns
-// them (base64) for the client to SHA-1 verify and persist. See ../README.md.
+// TCP and STREAMS each piece back as a binary frame the moment it is fetched
+// and SHA-1 verified (see ../lib/frames.ts). The client verifies again and
+// persists incrementally — no base64, no end-of-invocation JSON wall.
 
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { runDownload } from "../lib/download-session.ts";
+import { encodeMagic, encodePieceFrame, encodeSummaryFrame } from "../lib/frames.ts";
 import type { DownloadRequest } from "../lib/types.ts";
 
 export const config = {
@@ -19,18 +21,49 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
     res.status(405).json({ error: "POST only" });
     return;
   }
+
+  let body: DownloadRequest;
   try {
-    const body = (typeof req.body === "string" ? JSON.parse(req.body) : req.body) as DownloadRequest;
-    const err = validate(body);
-    if (err) {
-      res.status(400).json({ error: err });
-      return;
-    }
-    const result = await runDownload(body);
-    res.status(200).json(result);
-  } catch (e) {
-    res.status(500).json({ error: String((e as Error)?.message ?? e) });
+    body = (typeof req.body === "string" ? JSON.parse(req.body) : req.body) as DownloadRequest;
+  } catch {
+    res.status(400).json({ error: "invalid JSON body" });
+    return;
   }
+  const err = validate(body);
+  if (err) {
+    res.status(400).json({ error: err });
+    return;
+  }
+
+  // Errors before this point are normal JSON 4xx. From here on the response is
+  // a committed binary stream; a mid-stream failure just truncates it and the
+  // client keeps whatever verified pieces it already parsed.
+  res.status(200);
+  res.setHeader("content-type", "application/octet-stream");
+  res.setHeader("cache-control", "no-store");
+  res.write(Buffer.from(encodeMagic()));
+
+  try {
+    const summary = await runDownload(body, (index, data) => {
+      return writeAll(res, Buffer.from(encodePieceFrame(index, data)));
+    });
+    await writeAll(res, Buffer.from(encodeSummaryFrame(summary)));
+  } catch {
+    // Stream is already committed; ending without a summary frame signals a
+    // truncated round to the client.
+  } finally {
+    res.end();
+  }
+}
+
+// res.write with backpressure: wait for 'drain' when the kernel buffer is full
+// so large piece bursts don't balloon process memory.
+function writeAll(res: VercelResponse, chunk: Buffer): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const ok = res.write(chunk, (e) => (e ? reject(e) : undefined));
+    if (ok) return resolve();
+    res.once("drain", resolve);
+  });
 }
 
 function validate(b: DownloadRequest): string | null {

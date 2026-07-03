@@ -16,7 +16,12 @@ export const MsgId = {
   PIECE: 7,
   CANCEL: 8,
   PORT: 9,
+  EXTENDED: 20, // BEP 10 extension protocol
 } as const;
+
+// BEP 10: reserved byte 5, bit 0x10 signals extension protocol support.
+export const EXTENSION_RESERVED_BYTE = 5;
+export const EXTENSION_RESERVED_BIT = 0x10;
 
 export interface Handshake {
   infoHash: Uint8Array; // 20 bytes
@@ -31,7 +36,9 @@ export function buildHandshake(infoHash: Uint8Array, peerId: Uint8Array): Uint8A
   let o = 0;
   out[o++] = PROTOCOL.length; // pstrlen = 19
   for (let i = 0; i < PROTOCOL.length; i++) out[o++] = PROTOCOL.charCodeAt(i);
-  o += 8; // 8 reserved bytes left as zero
+  // Advertise BEP 10 extension protocol support (ut_pex, ut_metadata).
+  out[o + EXTENSION_RESERVED_BYTE] = EXTENSION_RESERVED_BIT;
+  o += 8;
   out.set(infoHash, o);
   o += 20;
   out.set(peerId, o);
@@ -94,6 +101,20 @@ export function piece(index: number, begin: number, block: Uint8Array): Uint8Arr
   return msg(MsgId.PIECE, p);
 }
 
+// BEP 10 extended message: <len><id=20><ext id u8><payload>.
+// ext id 0 = extension handshake; otherwise the id the receiver advertised in
+// its handshake `m` dict.
+export function extended(extId: number, payload: Uint8Array): Uint8Array {
+  const p = new Uint8Array(1 + payload.length);
+  p[0] = extId;
+  p.set(payload, 1);
+  return msg(MsgId.EXTENDED, p);
+}
+
+export function handshakeSupportsExtensions(hs: Handshake): boolean {
+  return (hs.reserved[EXTENSION_RESERVED_BYTE] & EXTENSION_RESERVED_BIT) !== 0;
+}
+
 // --- incoming message parsing ---
 
 export type ParsedMessage =
@@ -108,6 +129,7 @@ export type ParsedMessage =
   | { type: "piece"; index: number; begin: number; block: Uint8Array }
   | { type: "cancel"; index: number; begin: number; length: number }
   | { type: "port"; port: number }
+  | { type: "extended"; extId: number; payload: Uint8Array }
   | { type: "unknown"; id: number; payload: Uint8Array };
 
 // Accumulates raw TCP bytes and yields whole protocol messages. The handshake is
@@ -195,9 +217,24 @@ function decodeMessage(frame: Uint8Array): ParsedMessage {
       };
     case MsgId.PORT:
       return { type: "port", port: (payload[0] << 8) | payload[1] };
+    case MsgId.EXTENDED:
+      return { type: "extended", extId: payload[0], payload: payload.subarray(1) };
     default:
       return { type: "unknown", id, payload };
   }
+}
+
+// --- compact peer parsing (shared by tracker, PEX, DHT) ---
+
+// 6 bytes per peer: 4-byte IPv4 + 2-byte big-endian port.
+export function parseCompactPeers(buf: Uint8Array): { ip: string; port: number }[] {
+  const out: { ip: string; port: number }[] = [];
+  for (let i = 0; i + 6 <= buf.length; i += 6) {
+    const port = (buf[i + 4] << 8) | buf[i + 5];
+    if (port === 0) continue;
+    out.push({ ip: `${buf[i]}.${buf[i + 1]}.${buf[i + 2]}.${buf[i + 3]}`, port });
+  }
+  return out;
 }
 
 // --- bitfield helpers (MSB-first, per spec) ---

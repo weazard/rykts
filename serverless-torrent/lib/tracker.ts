@@ -6,6 +6,7 @@
 import dgram from "node:dgram";
 import { decode, type Bencodable } from "./bencode.ts";
 import { fromHex } from "./torrent.ts";
+import { dhtGetPeers } from "./dht.ts";
 import type { AnnounceRequest, AnnounceResponse, PeerAddr } from "./types.ts";
 
 export async function announce(req: AnnounceRequest): Promise<AnnounceResponse> {
@@ -14,9 +15,20 @@ export async function announce(req: AnnounceRequest): Promise<AnnounceResponse> 
   const trackers: AnnounceResponse["trackers"] = [];
   const dedup = new Map<string, PeerAddr>();
 
-  const results = await Promise.allSettled(
+  // Trackers and the DHT run in parallel — most real peers come from the DHT,
+  // and trackerless magnets have nothing but the DHT to go on.
+  const trackerJob = Promise.allSettled(
     req.announce.map((url) => announceOne(url, infoHash, peerId, req)),
   );
+  const dhtJob = req.noDht
+    ? Promise.resolve({ peers: [] as PeerAddr[], nodesQueried: 0, error: "disabled" })
+    : dhtGetPeers(req.infoHash).catch((e) => ({
+        peers: [] as PeerAddr[],
+        nodesQueried: 0,
+        error: String((e as Error)?.message ?? e),
+      }));
+
+  const [results, dhtRes] = await Promise.all([trackerJob, dhtJob]);
 
   results.forEach((r, i) => {
     const url = req.announce[i];
@@ -28,7 +40,18 @@ export async function announce(req: AnnounceRequest): Promise<AnnounceResponse> 
     }
   });
 
-  return { peers: [...dedup.values()], trackers };
+  for (const p of dhtRes.peers) dedup.set(`${p.ip}:${p.port}`, p);
+
+  return {
+    peers: [...dedup.values()],
+    trackers,
+    dht: {
+      ok: !dhtRes.error,
+      peerCount: dhtRes.peers.length,
+      nodesQueried: dhtRes.nodesQueried,
+      error: dhtRes.error,
+    },
+  };
 }
 
 function announceOne(
