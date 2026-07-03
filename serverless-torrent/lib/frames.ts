@@ -97,7 +97,7 @@ export type ParsedFrame =
 // the leading magic once. TCP/HTTP chunk boundaries do not respect frame
 // boundaries, so everything is length-driven.
 export class FrameReader {
-  private buf = new Uint8Array(0);
+  private buf: Uint8Array = new Uint8Array(0);
   private magicSeen = false;
 
   push(chunk: Uint8Array): void {

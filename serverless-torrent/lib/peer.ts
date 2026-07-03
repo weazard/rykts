@@ -74,7 +74,7 @@ export interface PeerRunResult {
 export class PeerConnection {
   private socket: net.Socket | null = null;
   private parser = new StreamParser();
-  private peerBitfield = new Uint8Array(0);
+  private peerBitfield: Uint8Array = new Uint8Array(0);
   private peerHas = new Set<number>(); // covers `have` msgs before/after bitfield
   private amInterested = false;
   private choked = true;
