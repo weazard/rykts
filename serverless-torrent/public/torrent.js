@@ -96,7 +96,20 @@ export async function parseTorrent(buf) {
     }
   }
 
-  return { infoHash, name, pieceLength, pieces, totalLength, files, announce: [...announce] };
+  // BEP 19 web seeds ("url-list") — plain HTTP(S) sources for the torrent's
+  // data. These matter to us doubly: the browser can fetch them directly, so
+  // pieces served by a web seed cost zero Vercel function invocations.
+  const webSeeds = [];
+  const urlList = value["url-list"];
+  if (urlList) {
+    const entries = Array.isArray(urlList) ? urlList : [urlList];
+    for (const u of entries) {
+      const s = typeof u === "string" ? u : new TextDecoder().decode(u);
+      if (/^https?:\/\//i.test(s)) webSeeds.push(s);
+    }
+  }
+
+  return { infoHash, name, pieceLength, pieces, totalLength, files, announce: [...announce], webSeeds };
 }
 
 // --- magnet links (BEP 9 flow) ---
@@ -118,7 +131,11 @@ export function parseMagnet(uri) {
   if (!infoHash) throw new Error("magnet missing a v1 btih infohash");
   const announce = params.getAll("tr");
   const dn = params.get("dn");
-  return { infoHash, name: dn || infoHash, announce };
+  // ws = web seeds (BEP 19), xs = exact source (.torrent URL) — both are pure
+  // HTTPS paths that let the browser fetch metadata/pieces with no peer wire.
+  const webSeeds = params.getAll("ws").filter((u) => /^https?:\/\//i.test(u));
+  const xs = (params.get("xs") || "").match(/^https?:\/\//i) ? params.get("xs") : null;
+  return { infoHash, name: dn || infoHash, announce, webSeeds, xs };
 }
 
 function base32ToHex(b32) {
@@ -138,7 +155,7 @@ function base32ToHex(b32) {
 
 // Build a TorrentMeta from a raw bencoded info dict (as returned by
 // /api/metadata) — the same shape parseTorrent produces from a .torrent file.
-export async function metaFromInfoDict(infoBytes, announce) {
+export async function metaFromInfoDict(infoBytes, announce, webSeeds) {
   const { value: info } = decodeBencode(infoBytes);
   const infoHash = await sha1Hex(infoBytes);
   const pieceLength = info["piece length"];
@@ -160,7 +177,16 @@ export async function metaFromInfoDict(infoBytes, announce) {
     files.push({ path: name, length: info.length, offset: 0 });
     totalLength = info.length;
   }
-  return { infoHash, name, pieceLength, pieces, totalLength, files, announce: announce || [] };
+  return {
+    infoHash,
+    name,
+    pieceLength,
+    pieces,
+    totalLength,
+    files,
+    announce: announce || [],
+    webSeeds: webSeeds || [],
+  };
 }
 
 export function bytesFromBase64(b64) {

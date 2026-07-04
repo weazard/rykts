@@ -349,9 +349,29 @@ export class TorrentEngine {
 
     while (this.running) {
       if (this.activeWorkers > this.targetWorkers) break;
-      await this.ensurePeers();
 
-      const batch = this.claimBatch(batchSize);
+      let batch = this.claimBatch(batchSize);
+
+      // Web seeds first (BEP 19): plain HTTPS fetches straight from the
+      // browser — no peers, no announce, no Vercel function invocations.
+      // Whatever the seeds serve is removed from the batch; only the remainder
+      // (if any) costs a peer round.
+      if (batch.length > 0 && this.meta.webSeeds?.length) {
+        const served = await this.webSeedRound(batch);
+        if (served.size > 0) {
+          const rest = batch.filter((w) => !served.has(w.index));
+          this.releaseBatch(batch.filter((w) => served.has(w.index)));
+          batch = rest;
+          idleRounds = 0;
+        }
+        if (batch.length === 0) {
+          this.onStats(this.stats());
+          continue;
+        }
+      }
+
+      if (batch.length > 0) await this.ensurePeers();
+
       if (batch.length === 0) {
         // Nothing to claim. In demand mode this is the common idle state: the
         // readahead window is satisfied, so park briefly instead of exiting —
@@ -429,6 +449,94 @@ export class TorrentEngine {
     } else if (throughput < prev * 0.8 && this.targetWorkers > 1) {
       this.targetWorkers--;
     }
+  }
+
+  // --- web seeds (BEP 19) ---
+
+  // Try to fetch each piece in `batch` from the torrent's web seeds. Returns
+  // the Set of piece indices successfully stored. Seeds that fail (CORS, 404,
+  // no Range support) are dropped for the rest of the session.
+  async webSeedRound(batch) {
+    const served = new Set();
+    const CONCURRENCY = 4;
+    let cursor = 0;
+    const lift = async () => {
+      while (cursor < batch.length && this.running !== false) {
+        const w = batch[cursor++];
+        try {
+          const data = await this.fetchPieceFromWebSeeds(w.index);
+          if (!data) continue;
+          const got = await sha1Hex(data);
+          if (got !== this.meta.pieces[w.index]) {
+            this.log(`webseed: piece ${w.index} failed verification; discarding`);
+            continue;
+          }
+          if (!bitGet(this.session.bitfield, w.index)) {
+            await this.store.putPiece(this.meta.infoHash, w.index, data);
+            bitSet(this.session.bitfield, w.index);
+            this.bytesDown += data.length;
+            this.notifyPiece(w.index);
+            this.renderProgress();
+          }
+          served.add(w.index);
+        } catch {
+          /* piece falls through to the peer round */
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(CONCURRENCY, batch.length) }, lift));
+    if (served.size > 0) {
+      await this.store.putSession(this.session);
+      this.log(`webseed: +${served.size} piece(s) over HTTPS (no function calls)`);
+    }
+    return served;
+  }
+
+  // Assemble one piece from web seeds. A piece spans [i*pieceLen, end) in the
+  // torrent's concatenated byte space and may straddle file boundaries; per
+  // BEP 19, seed URLs ending in "/" get the file path appended.
+  async fetchPieceFromWebSeeds(index) {
+    if (!this.deadSeeds) this.deadSeeds = new Set();
+    const pieceLen = this.meta.pieceLength;
+    const absStart = index * pieceLen;
+    const absEnd = Math.min(this.meta.totalLength, absStart + pieceLen); // exclusive
+    const out = new Uint8Array(absEnd - absStart);
+
+    // File spans overlapped by this piece.
+    const spans = [];
+    for (const f of this.meta.files) {
+      const fStart = f.offset;
+      const fEnd = f.offset + f.length;
+      const s = Math.max(absStart, fStart);
+      const e = Math.min(absEnd, fEnd);
+      if (s < e) spans.push({ file: f, from: s - fStart, to: e - fStart, at: s - absStart });
+    }
+
+    for (const span of spans) {
+      let ok = false;
+      for (const seed of this.meta.webSeeds) {
+        if (this.deadSeeds.has(seed)) continue;
+        const url = webSeedFileUrl(seed, this.meta, span.file);
+        try {
+          const res = await fetch(url, {
+            headers: { range: `bytes=${span.from}-${span.to - 1}` },
+          });
+          if (res.status !== 206 && res.status !== 200) throw new Error("HTTP " + res.status);
+          const buf = new Uint8Array(await res.arrayBuffer());
+          // A 200 means the server ignored Range; slice what we need.
+          const bytes = res.status === 200 ? buf.subarray(span.from, span.to) : buf;
+          if (bytes.length !== span.to - span.from) throw new Error("short read");
+          out.set(bytes, span.at);
+          ok = true;
+          break;
+        } catch (e) {
+          this.deadSeeds.add(seed);
+          this.log(`webseed ${seed} disabled: ${String(e?.message ?? e)}`);
+        }
+      }
+      if (!ok) return null;
+    }
+    return out;
   }
 
   async streamRound(body) {
@@ -560,6 +668,16 @@ export class TorrentEngine {
 // --- helpers (self-contained so this module runs in a SW too) ---
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// BEP 19 URL mapping: seed URLs ending in "/" are directories — append the
+// file path (which already starts with the torrent name for multi-file
+// torrents). Other URLs point directly at the single file.
+function webSeedFileUrl(seed, meta, file) {
+  if (!seed.endsWith("/")) return seed;
+  const single = meta.files.length === 1;
+  const path = single && !file.path.includes("/") ? file.path : file.path;
+  return seed + path.split("/").map(encodeURIComponent).join("/");
+}
 
 // location.href in a page, self.location in a worker/SW.
 function selfOrigin() {

@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en" class="bg-background">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Streaming Server SW — contract test</title>
+    <style>
+      :root { color-scheme: dark; }
+      body { font-family: ui-monospace, monospace; margin: 0; padding: 1.5rem; background: #0b0d10; color: #d7dbe0; line-height: 1.5; }
+      h1 { font-size: 1.1rem; }
+      input { width: 100%; padding: 0.5rem; border-radius: 6px; border: 1px solid #333; background: #14171c; color: inherit; }
+      button { margin-top: 0.5rem; padding: 0.45rem 0.8rem; border-radius: 6px; border: 1px solid #2b6cb0; background: #1a2733; color: #cfe3f7; cursor: pointer; }
+      button:disabled { opacity: 0.5; cursor: default; }
+      pre { background: #14171c; padding: 0.75rem; border-radius: 8px; overflow: auto; max-height: 40vh; white-space: pre-wrap; }
+      video { width: 100%; margin-top: 1rem; background: #000; border-radius: 8px; }
+      .row { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+    </style>
+  </head>
+  <body>
+    <h1>Streaming server Service Worker — contract test</h1>
+    <p class="sub" id="swstatus">registering service worker…</p>
+
+    <label for="magnet">Magnet / infohash</label>
+    <input id="magnet" value="magnet:?xt=urn:btih:dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c&dn=Big+Buck+Bunny&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337&tr=https%3A%2F%2Ftracker.bt4g.com%3A443%2Fannounce" />
+
+    <div class="row">
+      <button id="probe">GET /stream/settings</button>
+      <button id="create">POST create</button>
+      <button id="stats">GET stats.json</button>
+      <button id="play">Play largest file</button>
+    </div>
+
+    <video id="video" controls></video>
+    <pre id="log"></pre>
+
+    <script type="module">
+      const logEl = document.getElementById("log");
+      const log = (m) => {
+        logEl.textContent += (typeof m === "string" ? m : JSON.stringify(m, null, 2)) + "\n";
+        logEl.scrollTop = logEl.scrollHeight;
+      };
+      const infoHashFrom = (v) => {
+        const m = /btih:([0-9a-fA-F]{40})/.exec(v);
+        return (m ? m[1] : v.trim()).toLowerCase();
+      };
+      const trackersFrom = (v) =>
+        [...v.matchAll(/tr=([^&]+)/g)].map((m) => decodeURIComponent(m[1]));
+
+      async function register() {
+        try {
+          await navigator.serviceWorker.register("/local-server-sw.js", {
+            type: "module",
+            scope: "/",
+          });
+          await navigator.serviceWorker.ready;
+          document.getElementById("swstatus").textContent = "service worker ready — /stream/ is live";
+        } catch (e) {
+          document.getElementById("swstatus").textContent = "SW registration failed: " + e.message;
+        }
+      }
+      register();
+
+      document.getElementById("probe").onclick = async () => {
+        const r = await fetch("/stream/settings");
+        log("settings " + r.status);
+        log(await r.json());
+      };
+      document.getElementById("create").onclick = async () => {
+        const ih = infoHashFrom(document.getElementById("magnet").value);
+        const sources = ["dht:" + ih, ...trackersFrom(document.getElementById("magnet").value)];
+        log("creating " + ih + " …");
+        const r = await fetch(`/stream/${ih}/create`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ peerSearch: { sources } }),
+        });
+        log("create " + r.status);
+        log(await r.json());
+      };
+      document.getElementById("stats").onclick = async () => {
+        const ih = infoHashFrom(document.getElementById("magnet").value);
+        const r = await fetch(`/stream/${ih}/-1/stats.json`);
+        log("stats " + r.status);
+        log(await r.json());
+      };
+      document.getElementById("play").onclick = () => {
+        const ih = infoHashFrom(document.getElementById("magnet").value);
+        const tr = trackersFrom(document.getElementById("magnet").value)
+          .map((t) => "tr=" + encodeURIComponent(t))
+          .join("&");
+        const src = `/stream/${ih}/-1${tr ? "?" + tr : ""}`;
+        log("video src = " + src);
+        document.getElementById("video").src = src;
+        document.getElementById("video").play().catch((e) => log("play: " + e.message));
+      };
+    </script>
+  </body>
+</html>
