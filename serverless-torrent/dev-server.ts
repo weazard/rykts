@@ -45,6 +45,7 @@ const API_ROUTES: Record<string, string> = {
   "/api/download": "./api/download.ts",
   "/api/announce": "./api/announce.ts",
   "/api/metadata": "./api/metadata.ts",
+  "/api/transcode": "./api/transcode.ts",
 };
 
 async function readBody(req: IncomingMessage): Promise<string> {
@@ -79,7 +80,9 @@ async function handleApi(route: string, req: IncomingMessage, res: ServerRespons
   const raw = req.method === "GET" || req.method === "HEAD" ? "" : await readBody(req);
   const vreq = req as IncomingMessage & { body: unknown; query: Record<string, string> };
   vreq.body = raw; // handlers JSON.parse strings themselves
-  vreq.query = {};
+  vreq.query = Object.fromEntries(
+    new URL(req.url ?? "/", "http://localhost").searchParams.entries(),
+  );
 
   await handler(vreq, adaptRes(res));
 }
