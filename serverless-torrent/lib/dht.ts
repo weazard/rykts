@@ -10,6 +10,7 @@
 import dgram from "node:dgram";
 import { decode, encode, type Bencodable } from "./bencode.ts";
 import { parseCompactPeers } from "./wire.ts";
+import { udpAvailable } from "./net-probe.ts";
 import type { PeerAddr } from "./types.ts";
 
 const BOOTSTRAP: { host: string; port: number }[] = [
@@ -38,6 +39,15 @@ interface Node {
 }
 
 export async function dhtGetPeers(infoHashHex: string, budgetMs = DEFAULT_BUDGET_MS): Promise<DhtResult> {
+  // DHT is UDP-only (BEP 5). If the environment drops outbound UDP, fail fast
+  // with an actionable reason instead of timing out into a vague "no peers".
+  if (!(await udpAvailable())) {
+    return {
+      peers: [],
+      nodesQueried: 0,
+      error: "UDP egress blocked in this environment — DHT unavailable (works on Vercel deploys)",
+    };
+  }
   const infoHash = hexToBytes(infoHashHex);
   const selfId = randomBytes(NODE_ID_LEN);
   const peers = new Map<string, PeerAddr>();

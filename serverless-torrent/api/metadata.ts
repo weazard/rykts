@@ -28,6 +28,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
 
     // Discover peers unless the caller brought its own.
     let peers: PeerAddr[] = Array.isArray(body.peers) ? body.peers : [];
+    let discoveryDetail = "";
     if (peers.length < 5) {
       const disc = await announce({
         infoHash,
@@ -43,9 +44,21 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
           seen.add(k);
         }
       }
+      // Build a per-source breakdown so a failure explains itself instead of
+      // reporting a blanket "no peers".
+      const parts: string[] = [];
+      parts.push(
+        disc.dht.error
+          ? `DHT: ${disc.dht.error}`
+          : `DHT: ${disc.dht.peerCount} peers (${disc.dht.nodesQueried} nodes)`,
+      );
+      for (const t of disc.trackers) {
+        parts.push(t.ok ? `${t.url}: ${t.peerCount} peers` : `${t.url}: ${t.error}`);
+      }
+      discoveryDetail = parts.join(" | ");
     }
     if (peers.length === 0) {
-      res.status(502).json({ error: "no peers found for infohash (DHT + trackers empty)" });
+      res.status(502).json({ error: `no peers found for infohash — ${discoveryDetail}` });
       return;
     }
 
