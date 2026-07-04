@@ -72,25 +72,31 @@ test("downloads and verifies all pieces from a live mock peer", async () => {
   const hash0 = await sha1Hex(pieceSlice(data, 0));
   const hash1 = await sha1Hex(pieceSlice(data, 1));
 
-  const res = await runDownload({
-    infoHash: infoHashHex,
-    pieceLength: PIECE_LENGTH,
-    totalLength: TOTAL,
-    wanted: [
-      { index: 0, hash: hash0 },
-      { index: 1, hash: hash1 },
-    ],
-    peers: [{ ip: "127.0.0.1", port }],
-    deadlineMs: 5000,
-  });
+  // runDownload now streams: pieces arrive through the emit callback as they
+  // verify, and the return value is just the summary.
+  const emitted = new Map<number, Uint8Array>();
+  const res = await runDownload(
+    {
+      infoHash: infoHashHex,
+      pieceLength: PIECE_LENGTH,
+      totalLength: TOTAL,
+      wanted: [
+        { index: 0, hash: hash0 },
+        { index: 1, hash: hash1 },
+      ],
+      peers: [{ ip: "127.0.0.1", port }],
+      deadlineMs: 5000,
+    },
+    async (index, bytes) => {
+      emitted.set(index, bytes.slice());
+    },
+  );
 
   server.close();
 
-  assert.equal(res.pieces.length, 2, "both pieces returned");
-  const got0 = Buffer.from(res.pieces[0].data, "base64");
-  const got1 = Buffer.from(res.pieces[1].data, "base64");
-  assert.deepEqual([...got0], [...pieceSlice(data, 0)], "piece 0 bytes match");
-  assert.deepEqual([...got1], [...pieceSlice(data, 1)], "piece 1 bytes match");
+  assert.equal(emitted.size, 2, "both pieces emitted");
+  assert.deepEqual([...emitted.get(0)!], [...pieceSlice(data, 0)], "piece 0 bytes match");
+  assert.deepEqual([...emitted.get(1)!], [...pieceSlice(data, 1)], "piece 1 bytes match");
   assert.ok(res.peerHealth.some((h) => h.piecesServed === 2));
 });
 
@@ -106,22 +112,28 @@ test("rejects a peer that serves corrupt data (no false commit)", async () => {
   const realHash0 = await sha1Hex(pieceSlice(data, 0)); // expect the *correct* hash
   const hash1 = await sha1Hex(pieceSlice(data, 1));
 
-  const res = await runDownload({
-    infoHash: infoHashHex,
-    pieceLength: PIECE_LENGTH,
-    totalLength: TOTAL,
-    wanted: [
-      { index: 0, hash: realHash0 },
-      { index: 1, hash: hash1 },
-    ],
-    peers: [{ ip: "127.0.0.1", port }],
-    deadlineMs: 3000,
-  });
+  const emitted = new Set<number>();
+  await runDownload(
+    {
+      infoHash: infoHashHex,
+      pieceLength: PIECE_LENGTH,
+      totalLength: TOTAL,
+      wanted: [
+        { index: 0, hash: realHash0 },
+        { index: 1, hash: hash1 },
+      ],
+      peers: [{ ip: "127.0.0.1", port }],
+      deadlineMs: 3000,
+    },
+    async (index) => {
+      emitted.add(index);
+    },
+  );
 
   server.close();
 
-  // Piece 1 is intact and should come back; piece 0 is corrupt and must be dropped.
-  const indices = res.pieces.map((p) => p.index);
-  assert.ok(!indices.includes(0), "corrupt piece 0 was not committed");
-  assert.ok(indices.includes(1), "intact piece 1 still delivered");
+  // Piece 1 is intact and should stream out; piece 0 is corrupt and must never
+  // be emitted.
+  assert.ok(!emitted.has(0), "corrupt piece 0 was not emitted");
+  assert.ok(emitted.has(1), "intact piece 1 still delivered");
 });

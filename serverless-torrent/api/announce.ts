@@ -22,8 +22,10 @@ export default async function handler(req: VercelRequest, res: VercelResponse): 
       res.status(400).json({ error: "infoHash must be 40 hex chars" });
       return;
     }
-    if (!Array.isArray(body.announce) || body.announce.length === 0) {
-      res.status(400).json({ error: "announce must be a non-empty array of tracker URLs" });
+    // An empty tracker list is fine: the DHT lookup can find peers on its own
+    // (trackerless magnets have no announce URLs at all).
+    if (!Array.isArray(body.announce)) {
+      res.status(400).json({ error: "announce must be an array of tracker URLs" });
       return;
     }
     const result = await announce(body);

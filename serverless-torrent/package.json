@@ -5,6 +5,7 @@
   "type": "module",
   "description": "Semi-stateless, serverless-native BitTorrent leech for Vercel: browser holds durable state, functions do bounded outbound TCP downloading.",
   "scripts": {
+    "dev": "node --experimental-strip-types dev-server.ts",
     "test": "node --experimental-strip-types --test test/*.test.ts",
     "typecheck": "tsc --noEmit"
   },

@@ -10,20 +10,21 @@ stateful runs in the browser, and the half that needs raw outbound TCP runs in a
 disposable function.
 
 ```
-┌─────────────────────────── Browser (durable, long-lived) ───────────────────────────┐
-│  • parses the .torrent (piece hashes, layout)                                         │
-│  • IndexedDB: verified piece bytes + bitfield + cached peer list + stable peer id     │
-│  • orchestrator loop: decides what to fetch next, verifies results, persists          │
-└───────────────┬───────────────────────────────────────────────┬──────────────────────┘
-                │ POST /api/announce  (rare)                      │ POST /api/download (frequent)
-                ▼                                                 ▼
-   ┌────────────────────────┐                     ┌──────────────────────────────────────┐
-   │ stateless function     │                     │ stateless function                    │
-   │ HTTP/UDP tracker       │                     │ outbound TCP to N peers, BEP-3 wire,   │
-   │ announce → peer list   │                     │ pull blocks for the requested pieces,  │
-   │                        │                     │ return complete pieces (base64) + peer │
-   │                        │                     │ health. Self-limits to ~50 s.          │
-   └────────────────────────┘                     └──────────────────────────────────────┘
+┌─────────────────────────── Browser (durable, long-lived) ────────────────────────────┐
+│  • parses .torrent files OR magnet links (metadata fetched via BEP-9)                 │
+│  • IndexedDB: verified piece Blobs + bitfield + cached peer list + stable peer id     │
+│  • worker pool: 1-4 parallel /api/download invocations on disjoint piece ranges       │
+│    (concurrency configurable, default adaptive based on measured throughput)          │
+└──────┬─────────────────────────┬──────────────────────────────┬───────────────────────┘
+       │ POST /api/announce      │ POST /api/metadata (once     │ POST /api/download (hot
+       │ (rare)                  │ per magnet)                  │ path, streaming, xN)
+       ▼                         ▼                              ▼
+┌──────────────────┐  ┌───────────────────────┐  ┌─────────────────────────────────────┐
+│ HTTP/UDP tracker │  │ ut_metadata (BEP-9)   │  │ outbound TCP to N peers, BEP-3 wire  │
+│ announce + DHT   │  │ fetch info dict from  │  │ + PEX (BEP-11); STREAMS each SHA-1   │
+│ get_peers (BEP-5)│  │ peers → TorrentMeta   │  │ verified piece back as a binary      │
+│ → merged peers   │  │                       │  │ frame the moment it completes.       │
+└──────────────────┘  └───────────────────────┘  └─────────────────────────────────────┘
 ```
 
 ## How this answers the hard constraints
@@ -38,10 +39,14 @@ peers I know) → (verified pieces, peer health)`.
 **"Would the function rediscover peers every invocation? That eats the budget."**
 No. Discovery is split into its own endpoint (`/api/announce`) that the client
 calls *rarely* — only when its cached peer list drops below a threshold
-(`MIN_PEERS`). The hot path (`/api/download`) is handed a ready peer list and
-spends ~all of its ~50 s budget actually transferring data. Within a single
-invocation we still pay one TCP handshake per peer, but that cost is amortized
-across a whole batch of pieces (`BATCH_PIECES`), not paid per piece.
+(`MIN_PEERS`). Announce hits HTTP/UDP trackers **and a one-shot DHT `get_peers`
+lookup (BEP-5)** in parallel — the DHT is where most real-world peers come from,
+and it works even for trackerless magnets. On top of that, `/api/download`
+speaks **PEX (BEP-11)**: already-connected peers gossip their peer lists for
+free mid-download, and those flow back to the browser in the stream's summary
+frame. The hot path is handed a ready peer list and spends ~all of its ~50 s
+budget actually transferring data; the per-peer TCP handshake tax is amortized
+across an adaptively sized batch of pieces (8-128 per call).
 
 **"Data has to survive and not get corrupted."**
 Every piece is content-addressed by its SHA-1 (from the torrent's `pieces`
@@ -69,11 +74,15 @@ acceptable limitation for a download-to-browser tool.
 | `lib/piece-scheduler.ts` | per-invocation block-level work tracker |
 | `lib/peer.ts` | one outbound TCP peer connection (handshake → request → piece) |
 | `lib/download-session.ts` | runs many peers under a deadline, SHA-1 verifies pieces |
-| `lib/tracker.ts` | HTTP + UDP (BEP-15) announce |
-| `api/download.ts` | the bounded downloader function |
-| `api/announce.ts` | the peer-discovery function |
-| `public/*` | browser orchestrator: parser, IndexedDB store, loop, UI |
-| `test/*` | bencode/wire unit tests + a **live mock-seeder integration test** |
+| `lib/tracker.ts` | HTTP + UDP (BEP-15) announce, merged with DHT results |
+| `lib/dht.ts` | one-shot iterative DHT `get_peers` lookup (BEP-5) |
+| `lib/frames.ts` | binary streaming frame protocol for `/api/download` |
+| `lib/metadata-session.ts` | fetches the info dict from peers via ut_metadata (BEP-9) |
+| `api/download.ts` | the bounded downloader function (streams piece frames) |
+| `api/announce.ts` | the peer-discovery function (trackers + DHT) |
+| `api/metadata.ts` | magnet-link metadata fetch (BEP-9) |
+| `public/*` | browser orchestrator: parser, IndexedDB store, worker pool, UI |
+| `test/*` | bencode/wire/frames unit tests + a **live mock-seeder integration test** |
 
 ## Run the tests
 
@@ -99,8 +108,10 @@ the platform cap so it always returns partial progress instead of being killed.
 
 ## Limitations & honest trade-offs
 
-- **Leech-only.** No seeding, no inbound peers, no DHT (DHT needs a persistent
-  UDP node; serverless can't host one). Discovery is tracker-based.
+- **Leech-only.** No seeding and no inbound peers. DHT participation is
+  query-only: each announce does a bounded iterative `get_peers` lookup but the
+  function never joins the routing table as a node (that needs a persistent UDP
+  listener, which serverless can't host).
 - **Per-invocation handshake tax.** Sockets can't survive across invocations, so
   every `/api/download` re-handshakes its peers. Batching pieces per call is the
   mitigation; a stickier transport (e.g. one long-lived function via streaming /

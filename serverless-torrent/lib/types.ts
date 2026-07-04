@@ -34,10 +34,8 @@ export interface DownloadRequest {
   deadlineMs?: number; // soft budget; clamped server-side below the platform limit
 }
 
-export interface DownloadedPiece {
-  index: number;
-  data: string; // base64 of the raw piece bytes
-}
+// The response is no longer JSON: pieces stream back as binary frames followed
+// by a summary frame — see ./frames.ts for the wire format and summary type.
 
 export interface PeerHealth {
   peer: PeerAddr;
@@ -47,27 +45,43 @@ export interface PeerHealth {
   error?: string;
 }
 
-export interface DownloadResponse {
-  pieces: DownloadedPiece[]; // complete pieces fetched this invocation
-  peerHealth: PeerHealth[]; // so the client can prune/keep peers in its cache
-  elapsedMs: number;
-  hitDeadline: boolean;
-}
-
 // ---- /api/announce contract ----
 
 export interface AnnounceRequest {
   infoHash: string; // hex
-  announce: string[]; // tracker URLs
+  // Tracker URLs. May be empty: DHT alone can discover peers (magnet links
+  // often carry no trackers at all).
+  announce: string[];
   peerId?: string; // hex
   port?: number;
   left?: number;
   downloaded?: number;
   uploaded?: number;
   numWant?: number;
+  // Skip the DHT lookup (default false — DHT runs in parallel with trackers).
+  noDht?: boolean;
 }
 
 export interface AnnounceResponse {
   peers: PeerAddr[];
   trackers: { url: string; ok: boolean; peerCount: number; error?: string }[];
+  dht: { ok: boolean; peerCount: number; nodesQueried: number; error?: string };
+}
+
+// ---- /api/metadata contract (BEP 9 magnet support) ----
+
+export interface MetadataRequest {
+  infoHash: string; // hex, 40 chars
+  announce?: string[]; // trackers from the magnet's `tr` params, if any
+  peers?: PeerAddr[]; // optional pre-known peers (skips discovery)
+  peerId?: string; // hex
+}
+
+export interface MetadataResponse {
+  // Bencoded info dict, base64. Small (KBs) and one-shot, so JSON is fine here.
+  infoBase64: string;
+  name: string;
+  totalLength: number;
+  pieceCount: number;
+  peers: PeerAddr[]; // peers discovered along the way, seed for the download loop
 }

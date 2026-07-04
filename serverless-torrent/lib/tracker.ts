@@ -6,20 +6,61 @@
 import dgram from "node:dgram";
 import { decode, type Bencodable } from "./bencode.ts";
 import { fromHex } from "./torrent.ts";
+import { dhtGetPeers } from "./dht.ts";
+import { udpAvailable } from "./net-probe.ts";
 import type { AnnounceRequest, AnnounceResponse, PeerAddr } from "./types.ts";
+
+// Public HTTP(S) trackers merged in as a safety net when the torrent's own
+// announce list yields nothing (e.g. it only lists udp:// trackers and the
+// environment blocks UDP, or only wss:// trackers which need WebRTC). HTTPS
+// on :443 is the most firewall-tolerant transport there is.
+const FALLBACK_TRACKERS = [
+  "https://tracker.bt4g.com:443/announce",
+  "https://tracker.gbitt.info:443/announce",
+  "https://opentracker.i2p.rocks:443/announce",
+  "http://tracker.opentrackr.org:1337/announce",
+  "http://open.tracker.cl:1337/announce",
+];
 
 export async function announce(req: AnnounceRequest): Promise<AnnounceResponse> {
   const peerId = req.peerId ? fromHex(req.peerId) : defaultPeerId();
   const infoHash = fromHex(req.infoHash);
   const trackers: AnnounceResponse["trackers"] = [];
   const dedup = new Map<string, PeerAddr>();
+  const udpOk = await udpAvailable();
 
-  const results = await Promise.allSettled(
-    req.announce.map((url) => announceOne(url, infoHash, peerId, req)),
+  // The torrent's own trackers plus fallbacks it doesn't already list. wss://
+  // trackers are WebRTC-only — a server can't use them, skip with a clear note.
+  const requested = req.announce.filter((u) => !u.startsWith("ws"));
+  for (const u of req.announce) {
+    if (u.startsWith("ws")) {
+      trackers.push({ url: u, ok: false, peerCount: 0, error: "wss trackers are WebRTC-only (browser peers), skipped server-side" });
+    }
+  }
+  const urls = [...requested, ...FALLBACK_TRACKERS.filter((u) => !requested.includes(u))];
+
+  // Trackers and the DHT run in parallel — most real peers come from the DHT,
+  // and trackerless magnets have nothing but the DHT to go on.
+  const trackerJob = Promise.allSettled(
+    urls.map((url) => {
+      if (url.startsWith("udp:") && !udpOk) {
+        return Promise.reject(new Error("UDP egress blocked in this environment"));
+      }
+      return announceOne(url, infoHash, peerId, req);
+    }),
   );
+  const dhtJob = req.noDht
+    ? Promise.resolve({ peers: [] as PeerAddr[], nodesQueried: 0, error: "disabled" })
+    : dhtGetPeers(req.infoHash).catch((e) => ({
+        peers: [] as PeerAddr[],
+        nodesQueried: 0,
+        error: String((e as Error)?.message ?? e),
+      }));
+
+  const [results, dhtRes] = await Promise.all([trackerJob, dhtJob]);
 
   results.forEach((r, i) => {
-    const url = req.announce[i];
+    const url = urls[i];
     if (r.status === "fulfilled") {
       for (const p of r.value) dedup.set(`${p.ip}:${p.port}`, p);
       trackers.push({ url, ok: true, peerCount: r.value.length });
@@ -28,7 +69,18 @@ export async function announce(req: AnnounceRequest): Promise<AnnounceResponse> 
     }
   });
 
-  return { peers: [...dedup.values()], trackers };
+  for (const p of dhtRes.peers) dedup.set(`${p.ip}:${p.port}`, p);
+
+  return {
+    peers: [...dedup.values()],
+    trackers,
+    dht: {
+      ok: !dhtRes.error,
+      peerCount: dhtRes.peers.length,
+      nodesQueried: dhtRes.nodesQueried,
+      error: dhtRes.error,
+    },
+  };
 }
 
 function announceOne(
