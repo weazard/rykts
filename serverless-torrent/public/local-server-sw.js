@@ -363,20 +363,15 @@ function ensureEngine(infoHash, announce, webSeeds, xs) {
       // metadata with zero peers and zero function invocations.
       if (xs) {
         try {
-          console.log("[v0][sw] xs fetch:", xs);
           const buf = new Uint8Array(await (await fetch(xs)).arrayBuffer());
           const parsed = await parseTorrent(buf);
-          console.log("[v0][sw] xs parsed hash:", parsed.infoHash, "expected:", infoHash);
           if (parsed.infoHash === infoHash) {
             parsed.webSeeds = [...new Set([...(parsed.webSeeds || []), ...(webSeeds || [])])];
             meta = parsed;
           }
-        } catch (e) {
-          console.log("[v0][sw] xs path failed:", e?.message ?? e);
+        } catch {
           /* fall through to peer metadata */
         }
-      } else {
-        console.log("[v0][sw] no xs hint provided");
       }
       if (!meta) {
         const res = await postJsonSW("/api/metadata", { infoHash, announce });
