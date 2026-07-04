@@ -25,6 +25,8 @@ const FAST_ROUND_MS = 38000;
 const MIN_PEERS = 8; // re-announce when the cache drops below this
 const NUM_WANT = 80;
 const MAX_PEER_CACHE = 200;
+const ANNOUNCE_COOLDOWN_MS = 5000; // min gap between announces
+const ANNOUNCE_MAX_BACKOFF_MS = 120000; // cap when announces keep yielding nothing
 const MAX_WORKERS = 4;
 // In auto mode: scale up only if throughput improved at least this much since
 // the previous worker count was in effect.
@@ -188,31 +190,53 @@ function mergePeers(newPeers) {
   return added;
 }
 
+// Announce discipline: one in-flight announce shared by all workers, a
+// cooldown between attempts, and exponential backoff when nothing new comes
+// back. Without this, N workers each seeing a low cache stampede the endpoint
+// several times per second.
+let announceInFlight = null;
+let nextAnnounceAt = 0;
+let announceBackoffMs = ANNOUNCE_COOLDOWN_MS;
+
 async function ensurePeers() {
   if (session.peers.length >= MIN_PEERS) return;
-  log(
-    `peer cache low (${session.peers.length}); announcing ` +
-      `(${meta.announce.length} tracker(s) + DHT)…`,
-  );
-  const have = countSet(session.bitfield, meta.pieces.length);
-  const left = meta.totalLength - have * meta.pieceLength;
-  const res = await postJson("/api/announce", {
-    infoHash: meta.infoHash,
-    announce: meta.announce,
-    peerId: session.peerId,
-    left: Math.max(0, left),
-    numWant: NUM_WANT,
+  if (announceInFlight) return announceInFlight; // join the in-flight one
+  if (Date.now() < nextAnnounceAt) return; // cooling down
+
+  announceInFlight = (async () => {
+    log(
+      `peer cache low (${session.peers.length}); announcing ` +
+        `(${meta.announce.length} tracker(s) + DHT)…`,
+    );
+    const have = countSet(session.bitfield, meta.pieces.length);
+    const left = meta.totalLength - have * meta.pieceLength;
+    const res = await postJson("/api/announce", {
+      infoHash: meta.infoHash,
+      announce: meta.announce,
+      peerId: session.peerId,
+      left: Math.max(0, left),
+      numWant: NUM_WANT,
+    });
+    if (res.error) {
+      log("announce error: " + res.error);
+      announceBackoffMs = Math.min(announceBackoffMs * 2, ANNOUNCE_MAX_BACKOFF_MS);
+      nextAnnounceAt = Date.now() + announceBackoffMs;
+      return;
+    }
+    const added = mergePeers(res.peers);
+    await store.putSession(session);
+    const dht = res.dht?.ok
+      ? `DHT ${res.dht.peerCount} peer(s) from ${res.dht.nodesQueried} node(s)`
+      : `DHT failed (${res.dht?.error ?? "?"})`;
+    log(`announce → +${added} new peers (cache ${session.peers.length}); ${dht}`);
+    // Fruitless announces back off exponentially; a productive one resets.
+    announceBackoffMs =
+      added > 0 ? ANNOUNCE_COOLDOWN_MS : Math.min(announceBackoffMs * 2, ANNOUNCE_MAX_BACKOFF_MS);
+    nextAnnounceAt = Date.now() + announceBackoffMs;
+  })().finally(() => {
+    announceInFlight = null;
   });
-  if (res.error) {
-    log("announce error: " + res.error);
-    return;
-  }
-  const added = mergePeers(res.peers);
-  await store.putSession(session);
-  const dht = res.dht?.ok
-    ? `DHT ${res.dht.peerCount} peer(s) from ${res.dht.nodesQueried} node(s)`
-    : `DHT failed (${res.dht?.error ?? "?"})`;
-  log(`announce → +${added} new peers (cache ${session.peers.length}); ${dht}`);
+  return announceInFlight;
 }
 
 // Stripe the peer cache across workers so parallel invocations talk to mostly
@@ -228,12 +252,32 @@ function peersForWorker(workerSlot, totalWorkers) {
   return mine.slice(0, 40);
 }
 
+// Consecutive rounds where EVERY peer failed with zero pieces — the signature
+// of an environment that blocks the BitTorrent wire (DPI reset), not of a bad
+// swarm. Individual bad peers fail while others succeed.
+let totalWipeoutRounds = 0;
+
 function prunePeers(health) {
-  if (!health) return;
-  // Drop peers that connected but errored and served nothing; keep the rest.
-  const bad = new Set(
-    health.filter((h) => h.error && h.piecesServed === 0).map((h) => `${h.peer.ip}:${h.peer.port}`),
-  );
+  if (!health || health.length === 0) return;
+  const failed = health.filter((h) => h.error && h.piecesServed === 0);
+
+  // Everyone failed instantly → don't punish the peers; they're likely fine
+  // (your qBittorrent can reach them). Blame the network path instead.
+  if (failed.length === health.length) {
+    totalWipeoutRounds++;
+    if (totalWipeoutRounds === 2) {
+      log(
+        "diagnosis: every peer connection is failing with zero data — this " +
+          "environment appears to block BitTorrent traffic (DPI). Peers are " +
+          "kept in cache. Deploy to Vercel for working transfers.",
+      );
+    }
+    return;
+  }
+  totalWipeoutRounds = 0;
+
+  // Mixed results: drop only the peers that errored while others served data.
+  const bad = new Set(failed.map((h) => `${h.peer.ip}:${h.peer.port}`));
   if (bad.size === 0) return;
   session.peers = session.peers.filter((p) => !bad.has(`${p.ip}:${p.port}`));
 }
@@ -362,9 +406,20 @@ async function worker(id, respawn) {
       idleRounds = round.stored === 0 ? idleRounds + 1 : 0;
     }
 
-    if (idleRounds >= 3) {
+    if (idleRounds > 0) {
+      // Fruitless round: wait before retrying so a blocked/starved swarm
+      // doesn't turn into a hot loop of instant 0-piece rounds.
+      const wait = Math.min(2000 * 2 ** (idleRounds - 1), 30000);
+      log(`w${id}: no progress; backing off ${(wait / 1000).toFixed(0)}s`);
+      await sleep(wait);
+    }
+
+    if (idleRounds >= 3 && totalWipeoutRounds === 0) {
+      // Persistent stall with mixed peer results — the cache is probably full
+      // of stale peers. Clear and rediscover. (Skipped when the environment is
+      // blocking everything; fresh peers would fail identically.)
       log(`w${id}: no progress for 3 rounds; refreshing peer cache`);
-      session.peers = []; // force re-announce (tracker + DHT)
+      session.peers = [];
       await store.putSession(session);
       idleRounds = 0;
     }
@@ -373,6 +428,8 @@ async function worker(id, respawn) {
     renderStats();
   }
 }
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // Auto mode: grow the pool while throughput keeps improving, shrink when a
 // larger pool didn't pay for itself. Checked at round boundaries only.
