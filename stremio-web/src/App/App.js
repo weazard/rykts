@@ -77,25 +77,34 @@ const App = () => {
         if (typeof current !== 'string') return;
         const inBrowserUrl = CONSTANTS.DEFAULT_STREAMING_SERVER_URL;
         const isFactoryDefault = /^https?:\/\/127\.0\.0\.1:11470\/?$/.test(current) || current === '';
-        if (!isFactoryDefault) return;
-        // Register the in-browser server in the known-servers bucket so it shows
-        // up (selected) in Settings > Streaming, then make it the active server.
-        core.transport.dispatch({
-            action: 'Ctx',
-            args: {
-                action: 'AddServerUrl',
-                args: inBrowserUrl
-            }
-        });
-        core.transport.dispatch({
-            action: 'Ctx',
-            args: {
-                action: 'UpdateSettings',
+        if (isFactoryDefault) {
+            core.transport.dispatch({
+                action: 'Ctx',
                 args: {
-                    ...profile.settings,
-                    streamingServerUrl: inBrowserUrl
+                    action: 'UpdateSettings',
+                    args: {
+                        ...profile.settings,
+                        streamingServerUrl: inBrowserUrl
+                    }
                 }
+            });
+        }
+        // Ensure the in-browser server appears in the known-servers bucket in
+        // Settings > Streaming (idempotent: only added when missing).
+        core.transport.getState('ctx').then((ctx) => {
+            const bucket = ctx?.streamingServerUrls ?? [];
+            const listed = bucket.some((entry) => entry?.url === inBrowserUrl);
+            if (!listed) {
+                core.transport.dispatch({
+                    action: 'Ctx',
+                    args: {
+                        action: 'AddServerUrl',
+                        args: inBrowserUrl
+                    }
+                });
             }
+        }).catch(() => {
+            // bucket registration is cosmetic; ignore failures
         });
     }, [profile.settings?.streamingServerUrl]);
 
