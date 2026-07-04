@@ -98,15 +98,33 @@ async function onMagnet() {
     return;
   }
 
-  log(`magnet: fetching metadata for ${m.infoHash} (DHT + ${m.announce.length} tracker(s))…`);
   $("loadMagnet").disabled = true;
   try {
+    // Frugal path first: an "xs" hint is a direct HTTPS URL to the .torrent —
+    // no peers or Vercel functions needed for metadata at all.
+    if (m.xs) {
+      try {
+        log(`magnet: fetching .torrent from xs hint (no function calls)…`);
+        const buf = new Uint8Array(await (await fetch(m.xs)).arrayBuffer());
+        const parsed = await parseTorrent(buf);
+        if (parsed.infoHash === m.infoHash) {
+          parsed.webSeeds = [...new Set([...(parsed.webSeeds || []), ...(m.webSeeds || [])])];
+          await loadMeta(parsed, []);
+          return;
+        }
+        log("magnet: xs hint hash mismatch; falling back to peer metadata");
+      } catch (e) {
+        log(`magnet: xs fetch failed (${e?.message ?? e}); falling back to peer metadata`);
+      }
+    }
+
+    log(`magnet: fetching metadata for ${m.infoHash} (DHT + ${m.announce.length} tracker(s))…`);
     const res = await postJson("/api/metadata", { infoHash: m.infoHash, announce: m.announce });
     if (res.error) {
       log("metadata error: " + res.error);
       return;
     }
-    const parsed = await metaFromInfoDict(bytesFromBase64(res.infoBase64), m.announce);
+    const parsed = await metaFromInfoDict(bytesFromBase64(res.infoBase64), m.announce, m.webSeeds);
     if (parsed.infoHash !== m.infoHash) {
       log("metadata error: info dict hash mismatch; discarding");
       return;

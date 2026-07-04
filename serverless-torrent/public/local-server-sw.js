@@ -18,7 +18,7 @@
 // fileIdx of -1 means "largest file", per stremio-core.
 
 import { TorrentEngine } from "./engine.js";
-import { metaFromInfoDict, bytesFromBase64 } from "./torrent.js";
+import { metaFromInfoDict, parseTorrent, bytesFromBase64 } from "./torrent.js";
 
 const PREFIX = "/stream/";
 const SERVER_VERSION = "4.20.8"; // version we report; matches a real server shape
@@ -139,7 +139,9 @@ async function handleCreate(request, infoHash) {
     /* body optional */
   }
   const announce = trackersFromPeerSearch(body);
-  const engine = await ensureEngine(infoHash, announce);
+  const webSeeds = Array.isArray(body?.webSeeds) ? body.webSeeds : [];
+  const xs = typeof body?.xs === "string" && /^https?:\/\//i.test(body.xs) ? body.xs : null;
+  const engine = await ensureEngine(infoHash, announce, webSeeds, xs);
   return json(torrentInfo(engine));
 }
 
@@ -190,7 +192,12 @@ async function handleStats(infoHash, fileIdxRaw, url) {
 // --- range streaming: the heart of playback ---
 async function handleStream(request, infoHash, fileIdxRaw, url) {
   const announce = trackersFromQuery(url);
-  const engine = await ensureEngine(infoHash, announce);
+  // "ws"/"xs" query params carry BEP 19 web seeds and the .torrent URL through
+  // the stream URL — the zero-function HTTPS path when the torrent has them.
+  const webSeeds = url.searchParams.getAll("ws").filter((u) => /^https?:\/\//i.test(u));
+  const xsRaw = url.searchParams.get("xs");
+  const xs = xsRaw && /^https?:\/\//i.test(xsRaw) ? xsRaw : null;
+  const engine = await ensureEngine(infoHash, announce, webSeeds, xs);
   const file = pickFile(engine, fileIdxRaw);
   if (!file) return json({ error: "no playable file in torrent" }, 404);
 
@@ -236,7 +243,7 @@ async function handleStream(request, infoHash, fileIdxRaw, url) {
 // Ensure a running engine for infoHash with metadata loaded. Concurrent callers
 // share one boot promise. Metadata comes from the IndexedDB cache when present,
 // otherwise from /api/metadata (needs peers, which needs trackers/DHT).
-function ensureEngine(infoHash, announce) {
+function ensureEngine(infoHash, announce, webSeeds, xs) {
   const existing = engines.get(infoHash);
   if (existing && existing.meta) return Promise.resolve(existing);
   const booting = engineBoot.get(infoHash);
@@ -246,13 +253,39 @@ function ensureEngine(infoHash, announce) {
     const engine = await TorrentEngine.open({ onLog: (m) => console.log("[v0][sw]", m) });
     const cached = await engine.store.getSession(infoHash);
     if (cached?.meta?.pieces?.length) {
+      // Merge any newly provided web seeds into the cached meta so a repeat
+      // stream can still go the zero-function HTTPS route.
+      if (webSeeds?.length) {
+        cached.meta.webSeeds = [...new Set([...(cached.meta.webSeeds || []), ...webSeeds])];
+      }
       await engine.loadMeta(cached.meta, []);
     } else {
-      const res = await postJsonSW("/api/metadata", { infoHash, announce });
-      if (res.error) throw new Error("metadata: " + res.error);
-      const meta = await metaFromInfoDict(bytesFromBase64(res.infoBase64), announce);
-      if (meta.infoHash !== infoHash) throw new Error("info dict hash mismatch");
-      await engine.loadMeta(meta, res.peers || []);
+      let meta = null;
+      // Frugal path: an xs hint is a direct HTTPS URL to the .torrent file —
+      // metadata with zero peers and zero function invocations.
+      if (xs) {
+        try {
+          const buf = new Uint8Array(await (await fetch(xs)).arrayBuffer());
+          const parsed = await parseTorrent(buf);
+          if (parsed.infoHash === infoHash) {
+            parsed.webSeeds = [...new Set([...(parsed.webSeeds || []), ...(webSeeds || [])])];
+            meta = parsed;
+          }
+        } catch {
+          /* fall through to peer metadata */
+        }
+      }
+      if (!meta) {
+        const res = await postJsonSW("/api/metadata", { infoHash, announce });
+        if (res.error) throw new Error("metadata: " + res.error);
+        meta = await metaFromInfoDict(bytesFromBase64(res.infoBase64), announce, webSeeds);
+        if (meta.infoHash !== infoHash) throw new Error("info dict hash mismatch");
+        await engine.loadMeta(meta, res.peers || []);
+        engines.set(infoHash, engine);
+        engineBoot.delete(infoHash);
+        return engine;
+      }
+      await engine.loadMeta(meta, []);
     }
     engines.set(infoHash, engine);
     engineBoot.delete(infoHash);

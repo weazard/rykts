@@ -21,7 +21,7 @@
     <p class="sub" id="swstatus">registering service worker…</p>
 
     <label for="magnet">Magnet / infohash</label>
-    <input id="magnet" value="magnet:?xt=urn:btih:dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c&dn=Big+Buck+Bunny&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337&tr=https%3A%2F%2Ftracker.bt4g.com%3A443%2Fannounce" />
+    <input id="magnet" value="magnet:?xt=urn:btih:dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c&dn=Big+Buck+Bunny&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337&tr=https%3A%2F%2Ftracker.bt4g.com%3A443%2Fannounce&ws=https%3A%2F%2Fwebtorrent.io%2Ftorrents%2F&xs=https%3A%2F%2Fwebtorrent.io%2Ftorrents%2Fbig-buck-bunny.torrent" />
 
     <div class="row">
       <button id="probe">GET /stream/settings</button>
@@ -45,6 +45,12 @@
       };
       const trackersFrom = (v) =>
         [...v.matchAll(/tr=([^&]+)/g)].map((m) => decodeURIComponent(m[1]));
+      const webSeedsFrom = (v) =>
+        [...v.matchAll(/ws=([^&]+)/g)].map((m) => decodeURIComponent(m[1]));
+      const xsFrom = (v) => {
+        const m = /xs=([^&]+)/.exec(v);
+        return m ? decodeURIComponent(m[1]) : null;
+      };
 
       async function register() {
         try {
@@ -72,7 +78,11 @@
         const r = await fetch(`/stream/${ih}/create`, {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ peerSearch: { sources } }),
+          body: JSON.stringify({
+            peerSearch: { sources },
+            webSeeds: webSeedsFrom(document.getElementById("magnet").value),
+            xs: xsFrom(document.getElementById("magnet").value),
+          }),
         });
         log("create " + r.status);
         log(await r.json());
@@ -84,11 +94,15 @@
         log(await r.json());
       };
       document.getElementById("play").onclick = () => {
-        const ih = infoHashFrom(document.getElementById("magnet").value);
-        const tr = trackersFrom(document.getElementById("magnet").value)
-          .map((t) => "tr=" + encodeURIComponent(t))
-          .join("&");
-        const src = `/stream/${ih}/-1${tr ? "?" + tr : ""}`;
+        const val = document.getElementById("magnet").value;
+        const ih = infoHashFrom(val);
+        const xs = xsFrom(val);
+        const qs = [
+          ...trackersFrom(val).map((t) => "tr=" + encodeURIComponent(t)),
+          ...webSeedsFrom(val).map((w) => "ws=" + encodeURIComponent(w)),
+          ...(xs ? ["xs=" + encodeURIComponent(xs)] : []),
+        ].join("&");
+        const src = `/stream/${ih}/-1${qs ? "?" + qs : ""}`;
         log("video src = " + src);
         document.getElementById("video").src = src;
         document.getElementById("video").play().catch((e) => log("play: " + e.message));

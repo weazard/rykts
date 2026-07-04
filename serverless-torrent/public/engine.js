@@ -674,9 +674,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // torrents). Other URLs point directly at the single file.
 function webSeedFileUrl(seed, meta, file) {
   if (!seed.endsWith("/")) return seed;
-  const single = meta.files.length === 1;
-  const path = single && !file.path.includes("/") ? file.path : file.path;
-  return seed + path.split("/").map(encodeURIComponent).join("/");
+  return seed + file.path.split("/").map(encodeURIComponent).join("/");
 }
 
 // location.href in a page, self.location in a worker/SW.
