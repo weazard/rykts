@@ -672,7 +672,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // BEP 19 URL mapping: seed URLs ending in "/" are directories — append the
 // file path (which already starts with the torrent name for multi-file
 // torrents). Other URLs point directly at the single file.
-function webSeedFileUrl(seed, meta, file) {
+export function webSeedFileUrl(seed, meta, file) {
   if (!seed.endsWith("/")) return seed;
   return seed + file.path.split("/").map(encodeURIComponent).join("/");
 }

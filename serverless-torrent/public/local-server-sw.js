@@ -17,8 +17,9 @@
 //
 // fileIdx of -1 means "largest file", per stremio-core.
 
-import { TorrentEngine } from "./engine.js";
+import { TorrentEngine, webSeedFileUrl } from "./engine.js";
 import { metaFromInfoDict, parseTorrent, bytesFromBase64 } from "./torrent.js";
+import { handleHls } from "./hls.js";
 
 const PREFIX = "/stream/";
 const SERVER_VERSION = "4.20.8"; // version we report; matches a real server shape
@@ -31,16 +32,38 @@ const engineBoot = new Map(); // infoHashHex -> Promise<TorrentEngine> (dedup)
 self.addEventListener("install", () => self.skipWaiting());
 self.addEventListener("activate", (event) => event.waitUntil(self.clients.claim()));
 
+// stremio-core joins endpoint paths onto the configured base URL, so its
+// requests arrive under PREFIX (/stream/...). stremio-video however builds
+// URLs with url.resolve(serverURL, '/absolute/path'), which discards the
+// /stream/ prefix and lands at the origin root. Since this SW controls scope
+// '/', we route those root-level server endpoints too. Every pattern here is
+// unambiguous vs. the SPA's assets (40-hex infohash prefix or a reserved
+// server path), so normal page/asset requests still pass through untouched.
+// A 40-hex first segment alone is NOT enough: stremio-web's build serves its
+// own assets under a 40-hex commit-hash directory (/{hash}/scripts/main.js).
+// Only claim the path when the second segment is a torrent endpoint:
+// create, stats.json, or a (possibly negative) numeric fileIdx.
+const HASH_RE = /^\/[0-9a-fA-F]{40}\/(create$|stats\.json$|-?\d+(\/|$))/;
+const ROOT_SERVER_RE = /^\/(hlsv2|proxy)(\/|$)|^\/(subtitles\.vtt|opensubHash|casting|network-info|device-info|get-https)$/;
+
+function serverRest(url) {
+  if (url.pathname.startsWith(PREFIX)) return url.pathname.slice(PREFIX.length);
+  if (HASH_RE.test(url.pathname) || ROOT_SERVER_RE.test(url.pathname)) {
+    return url.pathname.slice(1);
+  }
+  return null;
+}
+
 self.addEventListener("fetch", (event) => {
   const url = new URL(event.request.url);
   if (url.origin !== self.location.origin) return;
-  if (!url.pathname.startsWith(PREFIX)) return;
-  event.respondWith(handle(event.request, url));
+  const rest = serverRest(url);
+  if (rest === null) return;
+  event.respondWith(handle(event.request, url, rest));
 });
 
-async function handle(request, url) {
+async function handle(request, url, rest) {
   try {
-    const rest = url.pathname.slice(PREFIX.length);
     const segments = rest.split("/").filter(Boolean);
 
     // --- probe / info endpoints ---
@@ -59,8 +82,24 @@ async function handle(request, url) {
       return json({ error: "https provisioning not supported by this server" }, 501);
     }
     if (segments[0] === "hlsv2") {
-      // Implemented in the HLS transcoding task.
-      return json({ error: "hls transcoding not yet enabled" }, 501);
+      // Probe + HLS transcoding, delegated to hls.js. Probing sniffs codecs
+      // from the file's own bytes (probe.js); segments are transcoded by
+      // either the /api/transcode function (web-seeded sources) or
+      // ffmpeg.wasm in a controlled page. See hls.js for the contract.
+      return await handleHls(request, url, resolveMedia);
+    }
+    // Video-layer extras. All failures here are non-critical to playback
+    // (stremio-video catches them and falls back to nulls).
+    if (segments[0] === "opensubHash") {
+      // OpenSubtitles moviehash needs the first+last 64KiB; skip until a
+      // subtitles task needs it. 200 + error field per server convention.
+      return json({ error: "opensubHash not supported", result: null });
+    }
+    if (segments[0] === "subtitles.vtt") {
+      return json({ error: "subtitle conversion not supported" }, 501);
+    }
+    if (segments[0] === "proxy") {
+      return json({ error: "proxying not supported by the in-browser server" }, 501);
     }
 
     // --- torrent endpoints: {infoHash}/... ---
@@ -69,6 +108,10 @@ async function handle(request, url) {
       // POST {infoHash}/create
       if (segments[1] === "create" && request.method === "POST") {
         return await handleCreate(request, infoHash);
+      }
+      // GET {infoHash}/stats.json (torrent-level, no fileIdx)
+      if (segments[1] === "stats.json") {
+        return await handleStats(infoHash, null, url);
       }
       // GET {infoHash}/{fileIdx}/stats.json
       if (segments.length >= 3 && segments[2] === "stats.json") {
@@ -142,7 +185,58 @@ async function handleCreate(request, infoHash) {
   const webSeeds = Array.isArray(body?.webSeeds) ? body.webSeeds : [];
   const xs = typeof body?.xs === "string" && /^https?:\/\//i.test(body.xs) ? body.xs : null;
   const engine = await ensureEngine(infoHash, announce, webSeeds, xs);
-  return json(torrentInfo(engine));
+  const info = torrentInfo(engine);
+  // stremio-video's createTorrent sends guessFileIdx ({} or {season,episode})
+  // when the stream has no explicit fileIdx and reads `guessedFileIdx` off the
+  // response to build the media URL.
+  if (body?.guessFileIdx !== false && body?.guessFileIdx !== undefined) {
+    info.guessedFileIdx = guessFileIdx(engine.meta.files, body.guessFileIdx || {});
+  }
+  return json(info);
+}
+
+// Pick the file a series/movie stream most likely refers to: prefer files
+// whose path matches the requested SxxExx, then the largest video file.
+const VIDEO_EXT_RE = /\.(mp4|mkv|webm|avi|mov|m4v|ts|m2ts|wmv|flv)$/i;
+function guessFileIdx(files, { season, episode } = {}) {
+  let candidates = files.filter((f) => VIDEO_EXT_RE.test(f.path));
+  if (candidates.length === 0) candidates = files;
+  if (season != null && episode != null) {
+    const pad = (n) => String(n).padStart(2, "0");
+    const re = new RegExp(
+      `s${pad(season)}[ ._-]*e${pad(episode)}|${season}x${pad(episode)}|s${season}e${episode}`,
+      "i"
+    );
+    const hit = candidates.filter((f) => re.test(f.path));
+    if (hit.length > 0) candidates = hit;
+  }
+  const best = candidates.reduce((a, b) => (b.length > a.length ? b : a), candidates[0]);
+  return files.indexOf(best);
+}
+
+// --- media resolution for hls.js (probe + transcoding) ---
+// Turn a mediaURL (one of our own /{infoHash}/{fileIdx}?tr=..&ws=.. stream
+// URLs) into { engine, file, webSeedUrl }. webSeedUrl is a direct HTTPS URL
+// to the same file when the torrent has a BEP 19 web seed — that's what lets
+// the /api/transcode function read the source server-side.
+async function resolveMedia(mediaURL) {
+  const media = new URL(mediaURL, self.location.origin);
+  const segs = media.pathname.replace(/^\/stream\//, "/").split("/").filter(Boolean);
+  const infoHash = normalizeHash(segs[0]);
+  if (!infoHash || segs.length < 2) {
+    throw new Error("unsupported mediaURL (not a torrent stream)");
+  }
+  const engine = await ensureEngine(
+    infoHash,
+    trackersFromQuery(media),
+    media.searchParams.getAll("ws").filter((u) => /^https?:\/\//i.test(u)),
+    null
+  );
+  const file = pickFile(engine, segs[1]);
+  if (!file) throw new Error("no such file");
+  const seeds = engine.meta.webSeeds || [];
+  const webSeedUrl = seeds.length > 0 ? webSeedFileUrl(seeds[0], engine.meta, file) : null;
+  return { engine, file, webSeedUrl };
 }
 
 // --- stats.json ---
@@ -159,6 +253,9 @@ async function handleStats(infoHash, fileIdxRaw, url) {
     name: engine.meta.name,
     infoHash,
     files: engine.meta.files.map(fileEntry),
+    // Index of the file the engine would stream for fileIdx=-1 (largest).
+    // The video layer's fetchFilename prefers this over guessing itself.
+    guessedFileIdx: engine.meta.files.indexOf(pickFile(engine, null)),
     sources: [],
     opts: {
       dht: true,
@@ -331,7 +428,13 @@ function trackersFromPeerSearch(body) {
 }
 
 function trackersFromQuery(url) {
-  return url.searchParams.getAll("tr");
+  // Media URLs built by stremio-video carry the peerSearch sources verbatim:
+  // "dht:{hash}" entries and "tracker:"-prefixed announce URLs. Keep only
+  // real tracker endpoints.
+  return url.searchParams
+    .getAll("tr")
+    .filter((s) => !s.startsWith("dht:"))
+    .map((s) => s.replace(/^tracker:/, ""));
 }
 
 function normalizeHash(seg) {
