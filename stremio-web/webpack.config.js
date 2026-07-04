@@ -243,6 +243,14 @@ module.exports = (env, argv) => ({
                 { from: '../serverless-torrent/public/torrent.js', to: 'torrent.js' },
                 { from: '../serverless-torrent/public/store.js', to: 'store.js' },
                 { from: '../serverless-torrent/public/frames.js', to: 'frames.js' },
+                // HLS transcoding: prober + routes (imported by the SW) and the
+                // page-side ffmpeg.wasm backend with its vendored assets.
+                { from: '../serverless-torrent/public/probe.js', to: 'probe.js' },
+                { from: '../serverless-torrent/public/hls.js', to: 'hls.js' },
+                { from: '../serverless-torrent/public/transcode-client.js', to: 'transcode-client.js' },
+                { from: '../serverless-torrent/public/ffmpeg', to: 'ffmpeg' },
+                { from: '../serverless-torrent/public/ffmpeg-util', to: 'ffmpeg-util' },
+                { from: '../serverless-torrent/public/ffmpeg-core', to: 'ffmpeg-core' },
             ]
         }),
         new MiniCssExtractPlugin({
