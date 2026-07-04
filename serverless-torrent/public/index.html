@@ -33,6 +33,8 @@
       }
       .conc { display: flex; align-items: center; gap: 0.35rem; margin-left: auto; opacity: 0.85; }
       .conc select { padding: 0.25rem 0.4rem; border-radius: 6px; border: 1px solid #8886; background: transparent; color: inherit; }
+      .danger { margin-left: auto; border-color: #dc262666; color: #dc2626; background: transparent; }
+      #storage { margin: 0; }
     </style>
   </head>
   <body>
@@ -72,6 +74,10 @@
       <p id="pct" class="sub">0/0 pieces (0%)</p>
       <p id="stats" class="sub"></p>
       <ul id="downloads"></ul>
+      <div class="row">
+        <span id="storage" class="sub"></span>
+        <button id="clear" class="danger" disabled>Clear stored data</button>
+      </div>
     </div>
 
     <div class="card">

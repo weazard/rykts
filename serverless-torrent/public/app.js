@@ -11,7 +11,15 @@ import {
   metaFromInfoDict,
   bytesFromBase64,
 } from "./torrent.js";
-import { Store, emptyBitfield, bitGet, bitSet, countSet } from "./store.js";
+import {
+  Store,
+  emptyBitfield,
+  bitGet,
+  bitSet,
+  countSet,
+  requestPersistentStorage,
+  storageEstimate,
+} from "./store.js";
 import { FrameReader } from "./frames.js";
 
 // Per-worker batch sizing. A worker that drains its batch well before the
@@ -54,8 +62,25 @@ const log = (msg) => {
   el.scrollTop = el.scrollHeight;
 };
 
+// Object URLs created for fallback downloads. Each pins its Blob (and thus the
+// backing bytes) in memory/disk until revoked, so we track and release them.
+const objectUrls = new Set();
+function trackedObjectUrl(blob) {
+  const url = URL.createObjectURL(blob);
+  objectUrls.add(url);
+  return url;
+}
+function revokeObjectUrls() {
+  for (const url of objectUrls) URL.revokeObjectURL(url);
+  objectUrls.clear();
+}
+
 async function init() {
   store = await Store.open();
+  // Ask for durable storage so a multi-GB download in progress isn't evicted
+  // under storage pressure.
+  const persisted = await requestPersistentStorage();
+  log(persisted ? "storage: persistent (won't be auto-evicted)" : "storage: best-effort (browser may evict under pressure)");
   $("file").addEventListener("change", onFile);
   $("loadMagnet").addEventListener("click", onMagnet);
   $("magnet").addEventListener("keydown", (e) => {
@@ -66,6 +91,24 @@ async function init() {
     running = false;
     log("stop requested");
   });
+  $("clear").addEventListener("click", clearStoredData);
+  await renderStorage();
+}
+
+// Show how much on-disk space this app is using (across all torrents) so the
+// user can see when a big download is occupying space — and clear it.
+async function renderStorage() {
+  const est = await storageEstimate();
+  const el = $("storage");
+  if (!est) {
+    el.textContent = "";
+    return;
+  }
+  const usedMb = est.usage / 1e6;
+  const used = usedMb > 1000 ? `${(usedMb / 1000).toFixed(2)} GB` : `${usedMb.toFixed(0)} MB`;
+  const quotaGb = est.quota / 1e9;
+  el.textContent = `storage in use: ${used} of ~${quotaGb.toFixed(1)} GB available`;
+  $("clear").disabled = !session || est.usage === 0;
 }
 
 async function onFile(e) {
@@ -143,6 +186,7 @@ async function loadMeta(parsedMeta, seedPeers) {
     `${meta.files.length} file(s) · ${meta.announce.length} tracker(s)`;
   $("start").disabled = false;
   renderProgress();
+  await renderStorage();
   log(`loaded ${meta.name} (infohash ${meta.infoHash})`);
 }
 
@@ -339,6 +383,7 @@ async function start() {
   $("start").disabled = false;
   $("stop").disabled = true;
   renderStats();
+  await renderStorage();
 }
 
 // One worker = a loop of bounded /api/download rounds over disjoint batches.
@@ -535,22 +580,92 @@ function fmtSpeed(bps) {
   return (bps / 1e3).toFixed(0) + " kB/s";
 }
 
-// --- assembly (Blob-backed: never materializes the whole file in memory) ---
+// --- assembly & storage lifecycle ---
+//
+// The completed data must not overstay its welcome: pieces live in IndexedDB
+// (persistent disk, NOT session memory — they survive tab close by design so
+// downloads can resume). Once the user has the real file, that copy is
+// redundant. Two paths:
+//
+//  1. File System Access API (Chrome/Edge): stream pieces straight into a
+//     user-chosen file on disk. No intermediate Blob, no object URL, and we can
+//     free IndexedDB immediately after the save completes.
+//  2. Fallback (Safari/Firefox): lazy Blob + object URL download link, with a
+//     "Clear stored data" button to purge IndexedDB once the file is saved.
 
 async function assemble() {
   const links = $("downloads");
   links.innerHTML = "";
+  revokeObjectUrls(); // drop references from any previous assembly
+
+  const canStream = typeof window.showSaveFilePicker === "function";
   for (const f of meta.files) {
-    const blob = await assembleFile(f);
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = f.path.split("/").pop();
-    a.textContent = `download ${f.path} (${(f.length / 1e6).toFixed(2)} MB)`;
     const li = document.createElement("li");
-    li.appendChild(a);
+    if (canStream) {
+      const btn = document.createElement("button");
+      btn.textContent = `save ${f.path} (${(f.length / 1e6).toFixed(2)} MB) to disk`;
+      btn.addEventListener("click", () => saveFileStreaming(f, btn));
+      li.appendChild(btn);
+    } else {
+      const a = document.createElement("a");
+      a.href = trackedObjectUrl(await assembleFile(f));
+      a.download = f.path.split("/").pop();
+      a.textContent = `download ${f.path} (${(f.length / 1e6).toFixed(2)} MB)`;
+      li.appendChild(a);
+    }
     links.appendChild(li);
   }
-  log("files ready");
+  log(
+    canStream
+      ? "files ready — saving streams directly to disk, then storage is freed"
+      : "files ready — after saving, use 'Clear stored data' to free disk space",
+  );
+  await renderStorage();
+}
+
+// Stream one file to a user-picked location, then free its IndexedDB copy.
+async function saveFileStreaming(file, btn) {
+  let handle;
+  try {
+    handle = await window.showSaveFilePicker({ suggestedName: file.path.split("/").pop() });
+  } catch {
+    return; // user cancelled the picker
+  }
+  btn.disabled = true;
+  try {
+    const writable = await handle.createWritable();
+    let remaining = file.length;
+    let abs = file.offset;
+    while (remaining > 0) {
+      const index = Math.floor(abs / meta.pieceLength);
+      const within = abs % meta.pieceLength;
+      const piece = await store.getPieceBlob(meta.infoHash, index);
+      if (!piece) throw new Error("missing piece " + index + " during save");
+      const take = Math.min(piece.size - within, remaining);
+      await writable.write(piece.slice(within, within + take));
+      abs += take;
+      remaining -= take;
+    }
+    await writable.close();
+    log(`saved ${file.path} to disk`);
+
+    // The user now owns the bytes; drop our redundant copy. Only safe when no
+    // other file in the torrent still needs shared boundary pieces, so for
+    // multi-file torrents we free on the explicit Clear button instead.
+    if (meta.files.length === 1) {
+      await store.deleteAllPieces(meta.infoHash, meta.pieces.length);
+      // Keep the session (peers, peer id) but reset the bitfield so it never
+      // claims pieces that no longer exist in the store.
+      session.bitfield = emptyBitfield(meta.pieces.length);
+      await store.putSession(session);
+      log("freed stored pieces — storage reclaimed");
+      renderProgress();
+      await renderStorage();
+    }
+  } catch (e) {
+    log("save error: " + (e?.message ?? e));
+    btn.disabled = false;
+  }
 }
 
 async function assembleFile(file) {
@@ -571,6 +686,25 @@ async function assembleFile(file) {
     remaining -= take;
   }
   return new Blob(parts);
+}
+
+// Purge everything stored for the current torrent: pieces, session record,
+// download links, and any object URLs pinning assembled Blobs.
+async function clearStoredData() {
+  if (!session) return;
+  if (running) {
+    log("stop the download before clearing stored data");
+    return;
+  }
+  const n = meta?.pieces?.length ?? session.meta?.pieces?.length ?? 0;
+  revokeObjectUrls();
+  $("downloads").innerHTML = "";
+  await store.clearTorrent(session.infoHash, n);
+  session.bitfield = emptyBitfield(n);
+  session.peers = [];
+  log(`cleared all stored data for ${session.infoHash}`);
+  renderProgress();
+  await renderStorage();
 }
 
 // --- helpers ---

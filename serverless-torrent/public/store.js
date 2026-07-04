@@ -72,6 +72,63 @@ export class Store {
     const blob = await this.getPieceBlob(infoHash, index);
     return blob ? new Uint8Array(await blob.arrayBuffer()) : null;
   }
+
+  async deletePiece(infoHash, index) {
+    return reqToPromise(tx(this.db, PIECES, "readwrite").delete(`${infoHash}:${index}`));
+  }
+
+  // Purge every stored piece for one torrent. This is how a finished download
+  // stops "overstaying its welcome": once the bytes are on the user's disk we
+  // reclaim the IndexedDB space instead of holding a redundant copy forever.
+  async deleteAllPieces(infoHash, numPieces) {
+    const os = tx(this.db, PIECES, "readwrite");
+    for (let i = 0; i < numPieces; i++) os.delete(`${infoHash}:${i}`);
+    return txDone(os.transaction);
+  }
+
+  async deleteSession(infoHash) {
+    return reqToPromise(tx(this.db, SESSIONS, "readwrite").delete(infoHash));
+  }
+
+  // Full removal: pieces + the session record (bitfield, peers, peer id).
+  async clearTorrent(infoHash, numPieces) {
+    await this.deleteAllPieces(infoHash, numPieces);
+    await this.deleteSession(infoHash);
+  }
+}
+
+// Wait for a whole readwrite transaction (not just one request) to commit.
+function txDone(transaction) {
+  return new Promise((resolve, reject) => {
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error);
+    transaction.onabort = () => reject(transaction.error);
+  });
+}
+
+// --- storage quota / durability (StorageManager API) ---
+
+// Ask the browser to make our storage persistent so a large in-progress
+// download isn't silently evicted under storage pressure. Best-effort: returns
+// the granted state, and false where the API is unavailable.
+export async function requestPersistentStorage() {
+  if (!navigator.storage?.persist) return false;
+  if (await navigator.storage.persisted?.()) return true;
+  try {
+    return await navigator.storage.persist();
+  } catch {
+    return false;
+  }
+}
+
+// { usage, quota } in bytes, or null when the API is unavailable.
+export async function storageEstimate() {
+  if (!navigator.storage?.estimate) return null;
+  try {
+    return await navigator.storage.estimate();
+  } catch {
+    return null;
+  }
 }
 
 // --- bitfield as a plain Uint8Array (MSB-first, matches the wire format) ---
