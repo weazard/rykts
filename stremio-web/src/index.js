@@ -75,6 +75,14 @@ if ('serviceWorker' in navigator && process.env.SERVICE_WORKER_DISABLED !== 'tru
             .catch((err) => {
                 console.error('[v0] streaming server SW registration failed:', err);
             });
+        // Page-side ffmpeg.wasm transcode backend: answers the SW's
+        // "v0-transcode" messages for sources the /api/transcode function
+        // can't reach (no web seed). Served from the build root, outside the
+        // webpack bundle, so the SW and page share one implementation.
+        import(/* webpackIgnore: true */ '/transcode-client.js')
+            .catch((err) => {
+                console.error('[v0] transcode client failed to load:', err);
+            });
     };
     if (document.readyState === 'complete') registerStreamingServer();
     else window.addEventListener('load', registerStreamingServer);
