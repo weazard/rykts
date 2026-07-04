@@ -20,6 +20,12 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const PUBLIC_DIR = join(__dirname, "public");
+// Optional self-hosted stremio-web build. When present, it's served as the
+// site root (so the Stremio UI, our engine files, and /api/* are all
+// same-origin — the Service Worker requirement). Falls back to public/ for the
+// standalone serverless-torrent harness pages (sw-test.html, index.html).
+const WEB_DIR =
+  process.env.STREMIO_WEB_BUILD ?? join(__dirname, "..", "stremio-web", "build");
 const PORT = Number(process.env.PORT ?? 3000);
 
 const MIME: Record<string, string> = {
@@ -78,15 +84,30 @@ async function handleApi(route: string, req: IncomingMessage, res: ServerRespons
   await handler(vreq, adaptRes(res));
 }
 
-async function serveStatic(pathname: string, res: ServerResponse): Promise<void> {
-  // Normalize and confine to PUBLIC_DIR (no path traversal).
-  const rel = normalize(pathname).replace(/^(\.\.[/\\])+/, "");
-  let filePath = join(PUBLIC_DIR, rel === "/" || rel === "" ? "index.html" : rel);
-
+// Try to resolve `rel` to a readable file inside `root`. Returns the resolved
+// path or null. Confined to `root` (no path traversal).
+async function resolveIn(root: string, rel: string): Promise<string | null> {
+  let filePath = join(root, rel === "/" || rel === "" ? "index.html" : rel);
   try {
     const s = await stat(filePath);
     if (s.isDirectory()) filePath = join(filePath, "index.html");
+    await stat(filePath);
+    return filePath;
   } catch {
+    return null;
+  }
+}
+
+async function serveStatic(pathname: string, res: ServerResponse): Promise<void> {
+  const rel = normalize(pathname).replace(/^(\.\.[/\\])+/, "");
+
+  // Resolution order: stremio-web build (site root) → serverless-torrent
+  // public/ (standalone harness) → SPA fallback to the web build's index.html.
+  let filePath = await resolveIn(WEB_DIR, rel);
+  if (!filePath) filePath = await resolveIn(PUBLIC_DIR, rel);
+  if (!filePath && !rel.includes(".")) filePath = await resolveIn(WEB_DIR, "/");
+
+  if (!filePath) {
     res.statusCode = 404;
     res.setHeader("content-type", "text/plain; charset=utf-8");
     res.end("404 Not Found");
@@ -98,6 +119,11 @@ async function serveStatic(pathname: string, res: ServerResponse): Promise<void>
     res.statusCode = 200;
     res.setHeader("content-type", MIME[extname(filePath)] ?? "application/octet-stream");
     res.setHeader("cache-control", "no-store");
+    // Module Service Workers may fetch imports; allow root scope registration
+    // regardless of the script's directory.
+    if (filePath.endsWith("local-server-sw.js")) {
+      res.setHeader("service-worker-allowed", "/");
+    }
     res.end(data);
   } catch {
     res.statusCode = 500;
